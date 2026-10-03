@@ -244,3 +244,10 @@ input[type=text]:focus { outline: 2px solid #cdddfd; border-color: var(--accent)
   padding: 4px 10px; cursor: pointer; font-size: 13px; margin-left: 8px;
 }
 .btn-mini:hover { background: #f3f4f6; }
+
+/* ---------- 3D view card ---------- */
+.view3d {
+  height: 300px; border: 1.5px solid var(--line); border-radius: 10px;
+  overflow: hidden; position: relative; background: #fff;
+}
+.vrow { margin-top: 8px; justify-content: space-between; }

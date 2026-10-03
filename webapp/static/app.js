@@ -31,7 +31,7 @@ function buildForm() {
   box.innerHTML = "";
   for (const e of SPEC) {
     if (e.type === "file" || e.id === "colors" || e.id === "chains" ||
-        e.id === "mono") continue;                    // handled in section 1
+        e.id === "mono" || e.id === "view" || e.id === "view_angles") continue;                    // handled in section 1
     const div = document.createElement("div");
     div.className = "fld";
     div.dataset.modes = (e.modes || []).join(",");
@@ -99,9 +99,28 @@ async function handlePDB(file) {
        value="${chainColors[c]}"></span>`).join("");
   $$("#colorRow input").forEach(inp => inp.addEventListener("input", () => {
     chainColors[inp.dataset.ch] = inp.value;
+    if (viewGL) {                       // keep the 3D card colors in sync
+      viewGL.setStyle({ chain: inp.dataset.ch },
+                      { cartoon: { color: inp.value } });
+      viewGL.render();
+    }
   }));
   $("#chainBox").classList.remove("hidden");
   $("#formHint").textContent = "";
+
+  // build the 3D view card: replicate the pipeline's auto base, show the
+  // molecule in cartoon style, live-rotatable
+  viewNChains = chains.length;
+  viewBasePdb = prepareViewPdb(text, chains);
+  $("#viewCard").classList.remove("hidden");
+  $("#f_view_angles").value = "";
+  if (viewBasePdb) {
+    initViewer();
+    refreshViewOut();
+    viewCardWarning();
+  } else {
+    $("#view3d").innerHTML = '<div class="ph">PDB 解析失败</div>';
+  }
 }
 
 // ---------- collect form ----------
@@ -116,7 +135,7 @@ function collect() {
   fd.append("mono", $("#mono").checked ? "1" : "0");
   for (const e of SPEC) {
     if (e.type === "file" || e.id === "colors" || e.id === "chains" ||
-        e.id === "mono") continue;
+        e.id === "mono" || e.id === "view" || e.id === "view_angles") continue;
     const el = $("#f_" + e.id);
     if (!el) continue;
     fd.append(e.id, el.type === "checkbox" ? (el.checked ? "1" : "0") : el.value);
@@ -238,64 +257,180 @@ function renderPreview() {
     : `<img src="/jobs/${jobId}/${currentFile}?t=${Date.now()}">`;
 }
 
-// ---------- view-angle visual preview ----------
-function parseAngles(s) {
-  const v = (s || "").split(",").map(t => parseFloat(t));
-  return v.length === 3 && v.every(n => Number.isFinite(n)) ? v : [0, 0, 0];
+// ---------- 3D view card (merged 视角 + 视角微调) ----------
+// The 3Dmol canvas shows the molecule in the render pipeline's BASE frame
+// (replicating render_flat.setup_view's auto alignment: center on chain
+// centroids, chain-plane normal to +z, first chain to +x). The user
+// drags to a final orientation; the net rotation matrix is decomposed
+// into x/y/z degrees that PyMOL's cmd.rotate (x, then y, then z, about
+// view axes) reproduces - the render pipeline is the same code path, so
+// what the canvas shows is what the job renders.
+let viewGL = null, viewBasePdb = null, viewNChains = 0;
+
+const mID = () => [[1, 0, 0], [0, 1, 0], [0, 0, 1]];
+function mMul(A, B) {
+  const C = [[0, 0, 0], [0, 0, 0], [0, 0, 0]];
+  for (let i = 0; i < 3; i++)
+    for (let j = 0; j < 3; j++)
+      for (let k = 0; k < 3; k++) C[i][j] += A[i][k] * B[k][j];
+  return C;
+}
+function mApply(R, p) {
+  return [R[0][0] * p[0] + R[0][1] * p[1] + R[0][2] * p[2],
+          R[1][0] * p[0] + R[1][1] * p[1] + R[1][2] * p[2],
+          R[2][0] * p[0] + R[2][1] * p[1] + R[2][2] * p[2]];
+}
+function rodrigues(a, b) {           // matrix rotating vector a onto b
+  const nl = v => { const l = Math.hypot(v[0], v[1], v[2]) || 1; return [v[0] / l, v[1] / l, v[2] / l]; };
+  a = nl(a); b = nl(b);
+  const v = [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+  const c = a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+  if (Math.hypot(v[0], v[1], v[2]) < 1e-9)
+    return c > 0 ? mID() : [[-1, 0, 0], [0, -1, 0], [0, 0, -1]];
+  const k = (1 - c) / (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+  const vx = [[0, -v[2], v[1]], [v[2], 0, -v[0]], [-v[1], v[0], 0]];
+  const m = [[1 + vx[0][0], vx[0][1], vx[0][2]],
+             [vx[1][0], 1 + vx[1][1], vx[1][2]],
+             [vx[2][0], vx[2][1], 1 + vx[2][2]]];
+  const v2 = mMul(vx, vx);
+  for (let i = 0; i < 3; i++)
+    for (let j = 0; j < 3; j++) m[i][j] += k * v2[i][j];
+  return m;
+}
+function rotZ(deg) {
+  const t = deg * Math.PI / 180, c = Math.cos(t), s = Math.sin(t);
+  return [[c, -s, 0], [s, c, 0], [0, 0, 1]];
 }
 
-function openViewModal() {
-  if (!$("#pdbFile").files[0]) {
-    $("#formHint").textContent = "请先上传 PDB 文件，再预览视角";
+function parsePdbAtoms(text) {
+  const atoms = [];
+  for (const ln of text.split("\n")) {
+    if (!ln.startsWith("ATOM  ")) continue;    // pipeline drops HETATM too
+    const x = parseFloat(ln.substr(30, 8)), y = parseFloat(ln.substr(38, 8)),
+          z = parseFloat(ln.substr(46, 8));
+    if (!Number.isFinite(x)) continue;
+    atoms.push({ line: ln, ch: ln[21], x, y, z,
+                 ca: ln.substr(12, 4).trim() === "CA" });
+  }
+  return atoms;
+}
+
+function prepareViewPdb(text, chains) {
+  const atoms = parsePdbAtoms(text);
+  if (!atoms.length) return null;
+  const cents = chains.map(ch => {
+    const pts = atoms.filter(a => a.ch === ch && a.ca);
+    const n = pts.length || 1;
+    return [pts.reduce((s, a) => s + a.x, 0) / n,
+            pts.reduce((s, a) => s + a.y, 0) / n,
+            pts.reduce((s, a) => s + a.z, 0) / n];
+  }).filter(c => Number.isFinite(c[0]));
+  const center = [0, 1, 2].map(i =>
+    cents.reduce((s, c) => s + c[i], 0) / cents.length);
+  let R = mID();
+  if (cents.length >= 3) {                    // matches setup_view's auto
+    const n = [(cents[1][0] - cents[0][0]) * (cents[2][1] - cents[0][1]) -
+               (cents[1][1] - cents[0][1]) * (cents[2][0] - cents[0][0]),
+               (cents[1][1] - cents[0][1]) * (cents[2][2] - cents[0][2]) -
+               (cents[1][2] - cents[0][2]) * (cents[2][1] - cents[0][1]),
+               (cents[1][2] - cents[0][2]) * (cents[2][0] - cents[0][0]) -
+               (cents[1][0] - cents[0][0]) * (cents[2][2] - cents[0][2])];
+    R = rodrigues(n, [0, 0, 1]);
+    const p = mApply(R, [cents[0][0] - center[0], cents[0][1] - center[1],
+                         cents[0][2] - center[2]]);
+    R = mMul(rotZ(90 - Math.atan2(p[1], p[0]) * 180 / Math.PI), R);
+  }
+  const out = [];
+  for (const a of atoms) {
+    const q = mApply(R, [a.x - center[0], a.y - center[1], a.z - center[2]]);
+    out.push(a.line.substr(0, 30) +
+             q[0].toFixed(3).padStart(8) + q[1].toFixed(3).padStart(8) +
+             q[2].toFixed(3).padStart(8) + a.line.substr(54));
+  }
+  return out.join("\n");
+}
+
+function initViewer() {
+  if (typeof $3Dmol === "undefined") {
+    $("#view3d").innerHTML = '<div class="ph">3D 组件加载失败</div>';
     return;
   }
-  const [x, y, z] = parseAngles($("#f_view_angles").value);
-  $("#va_x").value = x; $("#va_y").value = y; $("#va_z").value = z;
-  syncAngleLabels();
-  $("#viewHint").textContent = "";
-  $("#viewModal").classList.remove("hidden");
+  const el = $("#view3d");
+  el.innerHTML = "";
+  viewGL = $3Dmol.createViewer(el, { backgroundColor: "white" });
+  viewGL.addModel(viewBasePdb, "pdb");
+  for (const [ch, c] of Object.entries(chainColors))
+    viewGL.setStyle({ chain: ch }, { cartoon: { color: c } });
+  viewGL.zoomTo();
+  viewGL.render();
 }
 
-function syncAngleLabels() {
-  for (const a of ["x", "y", "z"])
-    $("#va_" + a + "_v").textContent = $("#va_" + a).value + "°";
+function refreshViewOut() {
+  const a = viewAngles();
+  $("#viewOut").textContent = `当前视角：${a[0]}°, ${a[1]}°, ${a[2]}°`;
 }
 
-function angleString() {
-  return ["x", "y", "z"].map(a => $("#va_" + a).value).join(",");
-}
-
-async function renderViewPreview() {
-  const f = $("#pdbFile").files[0];
-  if (!f) { $("#viewHint").textContent = "请先上传 PDB 文件"; return; }
-  const btn = $("#viewRender");
-  btn.disabled = true;
-  $("#viewHint").textContent = "渲染中…（约 5-10 秒）";
-  const fd = new FormData();
-  fd.append("pdb", f);
-  const chains = $("#chains").value.trim();
-  if (chains) fd.append("chains", chains);
-  for (const [ch, c] of Object.entries(chainColors)) fd.append("color_" + ch, c);
-  fd.append("mono", $("#mono").checked ? "1" : "0");
-  fd.append("rep", rep());
-  fd.append("view", $("#f_view") ? $("#f_view").value : "auto");
-  fd.append("view_angles", angleString());
-  try {
-    const r = await fetch("/api/preview_view", { method: "POST", body: fd });
-    if (!r.ok) {
-      const j = await r.json().catch(() => ({}));
-      $("#viewHint").textContent = j.error || "预览渲染失败";
-    } else {
-      const url = URL.createObjectURL(await r.blob());
-      $("#viewImg").innerHTML = `<img src="${url}" alt="视角预览">`;
-      $("#viewHint").textContent = "";
-    }
-  } catch (e) {
-    $("#viewHint").textContent = "预览请求失败";
+// net object->screen rotation of the 3D canvas, decomposed as
+// R = Rz(gamma)Ry(beta)Rx(alpha) (the render pipeline rotates x, then y,
+// then z about successive view axes). VIEW_SIGN calibrated against real
+// renders.
+const VIEW_SIGN = { x: 1, y: 1, z: 1 };
+function viewAngles() {
+  if (!viewGL) return [0, 0, 0];
+  // 3Dmol getView() returns 8 floats: [tx, ty, tz, dist, qx, qy, qz, qw]
+  // (a quaternion for the model rotation). Convert to a matrix and
+  // decompose as R = Rz(gamma)Ry(beta)Rx(alpha), matching the pipeline's
+  // cmd.rotate x, then y, then z about view axes.
+  const v = viewGL.getView();
+  const qx = v[4], qy = v[5], qz = v[6], qw = v[7];
+  const R = [
+    [1 - 2 * (qy * qy + qz * qz), 2 * (qx * qy - qz * qw), 2 * (qx * qz + qy * qw)],
+    [2 * (qx * qy + qz * qw), 1 - 2 * (qx * qx + qz * qz), 2 * (qy * qz - qx * qw)],
+    [2 * (qx * qz - qy * qw), 2 * (qy * qz + qx * qw), 1 - 2 * (qx * qx + qy * qy)],
+  ];
+  const sy = Math.hypot(R[2][1], R[2][2]);
+  let a, b, g;
+  if (sy < 1e-8) {                            // gimbal lock
+    a = 0;
+    b = (R[2][1] < 0 ? 90 : -90) * VIEW_SIGN.y;
+    g = VIEW_SIGN.z * VIEW_SIGN.x *
+      Math.atan2(-R[0][1] * VIEW_SIGN.x, R[1][1] * VIEW_SIGN.y) * 180 / Math.PI;
+  } else {
+    a = VIEW_SIGN.x * Math.atan2(R[2][1], R[2][2]) * 180 / Math.PI;
+    b = VIEW_SIGN.y * Math.atan2(-R[2][0], sy) * 180 / Math.PI;
+    g = VIEW_SIGN.z * Math.atan2(R[1][0], R[0][0]) * 180 / Math.PI;
   }
-  btn.disabled = false;
+  const r = d => Math.round(d * 10) / 10;
+  return [r(a), r(b), r(g)].map(d => (d > 180 ? d - 360 : d < -180 ? d + 360 : d));
 }
 
+function applyView() {
+  const a = viewAngles();
+  $("#f_view_angles").value = (a[0] || a[1] || a[2]) ? a.join(",") : "";
+  $("#f_view").value = $("#viewBase").value;
+  localStorage.setItem("ft_view", $("#viewBase").value);
+  localStorage.setItem("ft_view_angles", $("#f_view_angles").value);
+  $("#viewHint").textContent = "已应用：渲染端角度 = " +
+    ($("#f_view_angles").value || "0,0,0（不旋转）");
+}
+
+function resetView() {
+  if (!viewGL) return;
+  initViewer();
+  $("#f_view_angles").value = "";
+  localStorage.setItem("ft_view_angles", "");
+  refreshViewOut();
+  $("#viewHint").textContent = "";
+}
+
+function viewCardWarning() {
+  if ($("#viewBase").value !== "auto" || viewNChains < 3)
+    $("#viewHint").textContent =
+      "注意：orient 基准（或链数 <3 时的 auto）用的是 PyMOL 内部算法，"
+      + "此预览无法精确复现，应用的角度请以实际渲染为准。3 链以上建议用 auto。";
+}
+
+// ---------- wire up ----------
 // ---------- wire up ----------
 $("#pdbFile").addEventListener("change", e => e.target.files[0] && handlePDB(e.target.files[0]));
 const dz = $("#dropZone");
@@ -313,33 +448,20 @@ document.addEventListener("change", e => {
   if (e.target.id === "f_rep") syncModeVisibility();
 });
 
-// view-angle preview: button next to the view-angles field + modal wiring
+// view card wiring (the card owns 视角 + 视角微调; spec form skips both)
 function initViewTools() {
-  const fld = $("#f_view_angles")?.closest(".fld");
-  if (fld) {
-    const b = document.createElement("button");
-    b.type = "button";
-    b.className = "btn-mini";
-    b.textContent = "可视化调视角";
-    b.addEventListener("click", openViewModal);
-    fld.querySelector(".ctl").appendChild(b);
+  const lv = localStorage.getItem("ft_view");
+  if (lv === "auto" || lv === "orient") {
+    $("#viewBase").value = lv;
+    $("#f_view").value = lv;
   }
-  for (const a of ["x", "y", "z"])
-    $("#va_" + a).addEventListener("input", syncAngleLabels);
-  $("#viewRender").addEventListener("click", renderViewPreview);
-  $("#viewClose").addEventListener("click", () =>
-    $("#viewModal").classList.add("hidden"));
-  $("#viewModal").addEventListener("click", e => {
-    if (e.target === $("#viewModal")) $("#viewModal").classList.add("hidden");
+  $("#viewBase").addEventListener("change", () => {
+    $("#f_view").value = $("#viewBase").value;
+    localStorage.setItem("ft_view", $("#viewBase").value);
+    viewCardWarning();
   });
-  $("#viewApply").addEventListener("click", () => {
-    const el = $("#f_view_angles");
-    if (!el) return;
-    const s = angleString();
-    el.value = s === "0,0,0" ? "" : s;
-    el.dispatchEvent(new Event("change"));
-    $("#viewModal").classList.add("hidden");
-  });
+  $("#viewApply").addEventListener("click", applyView);
+  $("#viewReset").addEventListener("click", resetView);
 }
 
 $("#runBtn").addEventListener("click", async () => {
