@@ -350,6 +350,21 @@ function prepareViewPdb(text, chains) {
   return out.join("\n");
 }
 
+let viewWatch = null;
+function watchView() {
+  // 3Dmol has no rotation-change callback: poll the quaternion cheaply
+  // (requestAnimationFrame would spin forever; 150ms is plenty and stops
+  // when the tab is hidden)
+  if (viewWatch) clearInterval(viewWatch);
+  let last = null;
+  viewWatch = setInterval(() => {
+    if (!viewGL) return;
+    const v = viewGL.getView();
+    const key = v.slice(4).join(",");
+    if (key !== last) { last = key; refreshViewOut(); }
+  }, 150);
+}
+
 function initViewer() {
   if (typeof $3Dmol === "undefined") {
     $("#view3d").innerHTML = '<div class="ph">3D 组件加载失败</div>';
@@ -363,6 +378,7 @@ function initViewer() {
     viewGL.setStyle({ chain: ch }, { cartoon: { color: c } });
   viewGL.zoomTo();
   viewGL.render();
+  watchView();
 }
 
 function refreshViewOut() {
@@ -459,6 +475,7 @@ function initViewTools() {
     $("#f_view").value = $("#viewBase").value;
     localStorage.setItem("ft_view", $("#viewBase").value);
     viewCardWarning();
+    applyView();          // keep hidden view_angles in sync immediately
   });
   $("#viewApply").addEventListener("click", applyView);
   $("#viewReset").addEventListener("click", resetView);
