@@ -1,10 +1,25 @@
 # flat_trace — PyMOL 平涂渲染 → 分层矢量 管线
 
-把 PyMOL 的平涂渲染（无光影，ambient=1）临摹成分层 SVG，再导出
-Illustrator 分层 .ai：每条链一层（Chain_A/B/C），层内含 cartoon 与
-surface 子组；cartoon / surface / both 三种表现模式可选。可选
-**完整分层**（full layering）：每链额外携带一条隐藏的完整链图层
-（被遮挡部分也在），在 Illustrator 里点亮即可就地补全。
+<p align="center">
+  <img src="docs/images/preview_both.png" width="640"
+       alt="flat_trace 输出示例：多聚体蛋白，both 模式（半透明表面壳 + 卡通，按链分层）">
+</p>
+
+**flat_trace 是干什么的**：画蛋白结构图时，PyMOL 的位图导出放大就糊、
+ illustrator 手描又太费劲。flat_trace 让 PyMOL 以无光影平涂方式渲染结构，
+再把渲染结果**临摹成分层矢量图**——每条链是独立图层，填色、按雾深分档的
+明暗、mode-1 墨线全部是真正的矢量路径，可无限放大、逐条链拖动、改色、
+重排版，直接出出版级 SVG / Adobe Illustrator 成品。
+
+- 三种表现模式：cartoon / surface / **both**（半透明表面壳 + 内部卡通）
+- 多进程并行渲染，输出与串行逐字节一致
+- **完整分层**（full layering）：每链携带一条隐藏的完整链图层（被遮挡
+  部分也在），Illustrator 里点亮即可就地补全
+- 附带本地网页工具：上传 PDB → 表单填参 → 实时进度 → 下载
+
+> ⚠️ 项目仍在不断改进中，接口和行为可能调整。遇到问题或想要新功能，
+> 欢迎[提 issue](https://github.com/dredge071/flat_trace/issues)；
+> 欢迎提 PR 做贡献。
 
 ## 目录结构
 

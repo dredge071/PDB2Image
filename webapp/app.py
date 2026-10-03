@@ -195,6 +195,13 @@ def run_job(job_id, form, pdb_path):
 
             # ---------- stage 3 (optional): Illustrator .ai ----------
             if p["export_ai"]:
+                if not illustrator_available():
+                    raise RuntimeError(
+                        "未检测到可用的 Illustrator COM（未安装，或安装后未在"
+                        "系统注册表注册——部分精简版/绿色版会这样）。"
+                        "本次不生成 .ai；不勾选『导出分层 .ai』可正常出 SVG。"
+                        "若已安装正式版，重新安装或以管理员运行一次 Illustrator "
+                        "通常可恢复注册。")
                 log(job, f"━━ 第 3/{total} 步 · Illustrator .ai 导出 ━━")
                 args = [sys.executable, AI_PY, "--out-dir", jd,
                         "--svgs", os.path.join(jd, "flat_mono.svg") + "," +
@@ -242,10 +249,36 @@ def index():
 def api_params():
     return jsonify(spec=SPEC, internal=INTERNAL,
                    env={"pymol_python": os.path.exists(PYMOL_PY),
-                        "illustrator": os.name == "nt"})
+                        "illustrator": illustrator_available()})
 
 
 PER_WORKER_GB = 1.0      # rough RAM footprint of one PyMOL worker
+
+_ai_com_cache = None     # None = not probed yet
+
+
+def illustrator_available():
+    """Whether Illustrator can actually be driven. Being installed is not
+    enough: some installs are missing the COM registration, and then
+    CreateObject("Illustrator.Application") fails at export time. Probe
+    it once (a throwaway VBS) and cache the answer."""
+    global _ai_com_cache
+    if os.name != "nt":
+        return False
+    if _ai_com_cache is None:
+        import tempfile
+        vbs = os.path.join(tempfile.gettempdir(), "flat_ai_probe.vbs")
+        with open(vbs, "w") as fh:
+            fh.write('On Error Resume Next\n'
+                     'CreateObject("Illustrator.Application")\n'
+                     'If Err.Number <> 0 Then WScript.Quit 1\n')
+        try:
+            r = subprocess.run(["cscript", "//nologo", vbs],
+                               capture_output=True, timeout=120)
+            _ai_com_cache = (r.returncode == 0)
+        except (OSError, subprocess.TimeoutExpired):
+            _ai_com_cache = False
+    return _ai_com_cache
 
 
 @app.get("/api/resources")
@@ -403,6 +436,8 @@ def api_export_ai(job_id):
         return jsonify(error="任务不存在或未完成"), 400
     if os.name != "nt":
         return jsonify(error="仅 Windows 支持 Illustrator 导出"), 400
+    if not illustrator_available():
+        return jsonify(error="未检测到可用的 Illustrator COM（未安装或未注册）"), 400
 
     def work():
         try:

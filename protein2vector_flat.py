@@ -50,6 +50,12 @@ End Function
     print(r.stdout[-2000:])
     if r.returncode:
         print("VBS stderr:", r.stderr[-500:])
+        combined = (r.stdout or "") + (r.stderr or "")
+        if "创建对象" in combined or "create object" in combined.lower() \
+                or "0x1ACE" in combined or "activeX" in combined.lower():
+            print("[ai] Illustrator COM 创建失败：Illustrator 未安装，或安装后"
+                  "未在系统注册表注册（部分精简版/绿色版会这样）。"
+                  "SVG 产物不受影响；正式版重装或管理员运行一次通常可恢复。")
     print("[ai] report:")
     try:
         print(open(report, encoding="utf-8").read())
