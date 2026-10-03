@@ -1,7 +1,7 @@
-# flat_trace — PyMOL 平涂渲染 → 分层矢量 管线
+# PDB2Image — PyMOL 平涂渲染 → 分层矢量 管线
 
-**flat_trace 是干什么的**：画蛋白结构图时，PyMOL 的位图导出放大就糊、
- illustrator 手描又太费劲。flat_trace 让 PyMOL 以无光影平涂方式渲染结构，
+**PDB2Image 是干什么的**：画蛋白结构图时，PyMOL 的位图导出放大就糊、
+ illustrator 手描又太费劲。PDB2Image 让 PyMOL 以无光影平涂方式渲染结构，
 再把渲染结果**临摹成分层矢量图**——每条链是独立图层，填色、按雾深分档的
 明暗、mode-1 墨线全部是真正的矢量路径，可无限放大、逐条链拖动、改色、
 重排版，直接出 SVG / Adobe Illustrator 图，方便细节精修。
@@ -18,7 +18,7 @@
 - 附带本地网页工具：上传 PDB → 表单填参 → 实时进度 → 下载
 
 > 😁 项目仍在不断改进中，接口和行为可能调整。遇到问题或想要新功能，
-> 欢迎[提 issue](https://github.com/dredge071/flat_trace/issues)；
+> 欢迎[提 issue](https://github.com/dredge071/PDB2Image/issues)；
 > 欢迎提 PR 做贡献。
 
 ## 目录结构
@@ -192,7 +192,7 @@ python protein2vector_flat.py --out-dir out ^
 3. 组装态（什么都不动）与 visible 模式**逐字节一致**，发布前不需要做任何处理。
 
 限制与细节：完整分层只在**渲染宽度 2400** 出成品时可用（其他宽度自动回退
-visible 并在日志说明），渲染时间约 +60%；设计取舍的完整记录见
+visible 并在日志说明），渲染时间比较长；设计取舍的完整记录见
 `docs/full_layering_spec.md`。
 
 ## 依赖小结
@@ -204,11 +204,11 @@ visible 并在日志说明），渲染时间约 +60%；设计取舍的完整记�
 
 ## 引用
 
-如果 flat_trace 对你的工作有帮助，欢迎在成果中引用它：
+如果 PDB2Image 对你的工作有帮助，欢迎在成果中引用它：
 
-> dredge071. flat_trace: from flat-shaded PyMOL renders to layered
+> dredge071. PDB2Image: from flat-shaded PyMOL renders to layered
 > vector (SVG / Adobe Illustrator) figures of protein structures.
-> https://github.com/dredge071/flat_trace
+> https://github.com/dredge071/PDB2Image
 
 （GitHub 仓库首页的 "Cite this repository" 按钮可直接导出 BibTeX。）
 
