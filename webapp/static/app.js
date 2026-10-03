@@ -133,6 +133,11 @@ function collect() {
   if (chains) fd.append("chains", chains);
   for (const [ch, c] of Object.entries(chainColors)) fd.append("color_" + ch, c);
   fd.append("mono", $("#mono").checked ? "1" : "0");
+  // view card owns 视角/视角微调 (spec form skips both): send current values
+  const fv = $("#f_view");
+  if (fv) fd.append("view", fv.value || "auto");
+  const fa = $("#f_view_angles");
+  if (fa) fd.append("view_angles", fa.value.trim());
   for (const e of SPEC) {
     if (e.type === "file" || e.id === "colors" || e.id === "chains" ||
         e.id === "mono" || e.id === "view" || e.id === "view_angles") continue;
@@ -384,6 +389,7 @@ function initViewer() {
 function refreshViewOut() {
   const a = viewAngles();
   $("#viewOut").textContent = `当前视角：${a[0]}°, ${a[1]}°, ${a[2]}°`;
+  syncViewFields();       // rotation / base change lands in the form immediately
 }
 
 // net object->screen rotation of the 3D canvas, decomposed as
@@ -420,14 +426,12 @@ function viewAngles() {
   return [r(a), r(b), r(g)].map(d => (d > 180 ? d - 360 : d < -180 ? d + 360 : d));
 }
 
-function applyView() {
+function syncViewFields() {
   const a = viewAngles();
   $("#f_view_angles").value = (a[0] || a[1] || a[2]) ? a.join(",") : "";
   $("#f_view").value = $("#viewBase").value;
   localStorage.setItem("ft_view", $("#viewBase").value);
   localStorage.setItem("ft_view_angles", $("#f_view_angles").value);
-  $("#viewHint").textContent = "已应用：渲染端角度 = " +
-    ($("#f_view_angles").value || "0,0,0（不旋转）");
 }
 
 function resetView() {
@@ -472,12 +476,9 @@ function initViewTools() {
     $("#f_view").value = lv;
   }
   $("#viewBase").addEventListener("change", () => {
-    $("#f_view").value = $("#viewBase").value;
-    localStorage.setItem("ft_view", $("#viewBase").value);
+    syncViewFields();
     viewCardWarning();
-    applyView();          // keep hidden view_angles in sync immediately
   });
-  $("#viewApply").addEventListener("click", applyView);
   $("#viewReset").addEventListener("click", resetView);
 }
 

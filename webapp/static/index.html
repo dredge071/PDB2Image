@@ -41,16 +41,16 @@
     <div id="viewCard" class="subcard hidden">
       <label class="row"><span>视角基准</span>
         <select id="viewBase">
-          <option value="auto" selected>auto（按链自动摆正，≥3 链精确预览）</option>
-          <option value="orient">orient（PyMOL 算法，预览仅供参考）</option>
+          <option value="auto" selected>auto（按链自动摆正，推荐）</option>
+          <option value="orient">orient（PyMOL 内部算法）</option>
         </select></label>
+      <div class="desc">基准 = 出发的初始姿态（即 0°,0°,0° 那张图）；
+        下面 3D 里转出来的角度是在基准之上的旋转，两者叠加才是最终视角，
+        换基准后请重新转。auto 且 ≥3 链时预览与渲染一致；orient 只能近似。</div>
       <div id="view3d" class="view3d"><div class="ph">加载中…</div></div>
       <div class="row vrow">
         <span id="viewOut">当前视角：0°, 0°, 0°</span>
-        <span>
-          <button id="viewReset" type="button" class="btn-mini">重置</button>
-          <button id="viewApply" type="button" class="btn-mini">应用此视角</button>
-        </span>
+        <span><button id="viewReset" type="button" class="btn-mini">重置</button></span>
       </div>
       <div id="viewHint" class="reshint"></div>
       <input type="hidden" id="f_view" value="auto">
@@ -99,6 +99,6 @@
 </main>
 
 <script src="vendor/3Dmol.min.js"></script>
-<script src="app.js?v=3"></script>
+<script src="app.js?v=4"></script>
 </body>
 </html>
