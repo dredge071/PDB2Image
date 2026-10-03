@@ -1,8 +1,18 @@
 @echo off
+setlocal enabledelayedexpansion
 rem Launch the flat_trace web tool and open the browser.
-rem Interpreter resolution order:  PY env var  >  FLAT_TRACE_PYTHON  >  python on PATH
+rem Interpreter resolution order:
+rem   PY env var  >  FLAT_TRACE_PYTHON
+rem   >  a pymol-env next to this repo, IF it has flask (single-env setup)
+rem   >  python on PATH
 cd /d %~dp0
 if not defined PY if defined FLAT_TRACE_PYTHON set PY=%FLAT_TRACE_PYTHON%
+if not defined PY (
+    set "CAND=%~dp0..\pymol-env\python.exe"
+    if exist "!CAND!" (
+        "!CAND!" -c "import flask" >nul 2>&1 && set PY=!CAND!
+    )
+)
 if not defined PY set PY=python.exe
 
 rem already running?

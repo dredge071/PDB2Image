@@ -4,7 +4,7 @@
  illustrator 手描又太费劲。flat_trace 让 PyMOL 以无光影平涂方式渲染结构，
 再把渲染结果**临摹成分层矢量图**——每条链是独立图层，填色、按雾深分档的
 明暗、mode-1 墨线全部是真正的矢量路径，可无限放大、逐条链拖动、改色、
-重排版，直接出出版级 SVG / Adobe Illustrator 成品。
+重排版，直接出 SVG / Adobe Illustrator 图，方便细节精修。
 
 <p align="center">
   <img src="docs/images/preview_both.png" width="640"
@@ -17,7 +17,7 @@
   部分也在），Illustrator 里点亮即可就地补全
 - 附带本地网页工具：上传 PDB → 表单填参 → 实时进度 → 下载
 
-> ⚠️ 项目仍在不断改进中，接口和行为可能调整。遇到问题或想要新功能，
+> 😁 项目仍在不断改进中，接口和行为可能调整。遇到问题或想要新功能，
 > 欢迎[提 issue](https://github.com/dredge071/flat_trace/issues)；
 > 欢迎提 PR 做贡献。
 
@@ -36,39 +36,66 @@
 
 ## 安装
 
-1. **主 Python 环境**（矢量化 + 网站工具，≥3.10）：
+### 方案一（推荐）：单个 conda 环境装完所有东西
 
-   ```bash
-   pip install -r webapp/requirements.txt
-   ```
+PyMOL 和矢量化依赖装进**同一个** conda 环境（conda 会一并解好版本
+兼容），之后渲染、矢量化、网站工具全用它，**无需设置任何环境变量**：
 
-2. **PyMOL 环境**：渲染在独立的 PyMOL 环境中运行（与主环境隔离，
-   因为 PyMOL 自带一套特定版本的 numpy 等）。推荐用 conda 装开源版：
+```bash
+# 进入 flat_trace 目录（cd 到它里面，不是它的上级目录），
+# 这样 ../pymol-env 正好落在仓库旁边，flat_trace 会自动找到它
+cd flat_trace
+conda create -p ../pymol-env -c conda-forge ^
+    pymol-open-source flask python-multipart numpy opencv pillow pymupdf
+```
 
-   ```bash
-   # 方式 A（零配置）：把环境建在仓库旁边、命名为 pymol-env，
-   # flat_trace 会自动找到 ../pymol-env/python.exe
-   cd <flat_trace 所在目录>
-   conda create -p ../pymol-env -c conda-forge pymol-open-source
+不想 cd 的话，`-p` 直接写绝对路径也行（同样要求：位置在仓库旁边、
+名为 pymol-env，才能被自动发现）：
 
-   # 方式 B：环境建在任意位置（如常规的 conda env），手动指定路径
-   conda create -n pymol -c conda-forge pymol-open-source
-   # 然后设置环境变量（Windows 示例）：
-   #   set FLAT_TRACE_PYMOL_PY=%CONDA_PREFIX%\envs\pymol-env\python.exe
-   ```
+```bash
+conda create -p "D:\somewhere\pymol-env" -c conda-forge ^
+    pymol-open-source flask python-multipart numpy opencv pillow pymupdf
+```
 
-   已有能 `import pymol` 的 Python 环境（如官方安装版）也可以直接把
-   它的 python 路径填给 `FLAT_TRACE_PYMOL_PY`，无需 conda。
+然后双击 `webapp\start_web.bat` 即可（它会优先用旁边这个环境启动网站）。
 
-3. **（可选）分层 .ai 导出**：仅 Windows + 已装 Adobe Illustrator
-   （COM 接口）。不需要 .ai 时可完全忽略。
+### 方案二：两个环境分开
+
+主 Python 环境（≥3.10）只装矢量化 + 网站依赖：
+
+```bash
+pip install -r webapp/requirements.txt
+```
+
+PyMOL 单独一个环境（名称位置随意）：
+
+```bash
+conda create -n pymol -c conda-forge pymol-open-source
+```
+
+渲染端解释器按以下顺序自动探测（两环境模式通常要设第 1 条）：
+
+1. 环境变量 `FLAT_TRACE_PYMOL_PY` → PyMOL 环境的 python 可执行文件；
+2. 当前解释器自己能 `import pymol` → 直接用它（即方案一的单环境模式）；
+3. 仓库旁边的 `../pymol-env/python.exe`。
+
+> 为什么 PyMOL 要独立：PyMOL 发行版自带一套特定版本的 numpy 等，直接
+> pip 混装进现有环境容易互相污染；但方案一用 conda 在一个**新建**环境
+> 里统一求解就没有这个问题。
+
+**（可选）分层 .ai 导出**：仅 Windows + 已装 Adobe Illustrator（COM
+接口）。不需要 .ai 时可完全忽略；网站会自动探测 Illustrator 是否真的
+可用（个别安装缺少 COM 注册，此时 .ai 导出会给出明确提示，SVG 不受
+影响）。
 
 ## 环境变量
 
+两个都是**可选**的（单环境方案一不需要设任何变量）：
+
 | 变量 | 作用 |
 |---|---|
-| `FLAT_TRACE_PYMOL_PY` | 渲染端解释器（PyMOL 环境的 python.exe）。默认找仓库旁的 `../pymol-env/python.exe` |
-| `FLAT_TRACE_PYTHON` | 网站工具的解释器（`start_web.bat` 使用；不设则用 PATH 里的 python） |
+| `FLAT_TRACE_PYMOL_PY` | 渲染端解释器（PyMOL 环境的 python 可执行文件）。不设则按"当前解释器能 import pymol → 仓库旁 ../pymol-env"的顺序探测 |
+| `FLAT_TRACE_PYTHON` | 网站工具的解释器（`start_web.bat` 使用；不设则先试旁边带 flask 的 pymol-env，再用 PATH 里的 python） |
 
 ## 快速开始
 

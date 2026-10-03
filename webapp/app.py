@@ -26,10 +26,24 @@ ROOT = os.path.dirname(HERE)                      # flat_trace/
 sys.path.insert(0, HERE)
 from params_spec import SPEC, INTERNAL            # noqa: E402
 
-PYMOL_PY = os.environ.get(
-    "FLAT_TRACE_PYMOL_PY",
-    # default: a "pymol-env" venv sitting next to this repository
-    os.path.abspath(os.path.join(ROOT, "..", "pymol-env", "python.exe")))
+def _detect_pymol_py():
+    """Render-stage interpreter, in order of preference:
+    1. FLAT_TRACE_PYMOL_PY (explicit override)
+    2. THIS interpreter, if it can import pymol (single-env setup: one
+       conda env holds PyMOL and the vectorize/webapp deps alike)
+    3. a "pymol-env" venv/conda-prefix sitting NEXT to the repository
+    """
+    env = os.environ.get("FLAT_TRACE_PYMOL_PY")
+    if env:
+        return env
+    import importlib.util
+    if importlib.util.find_spec("pymol") is not None:
+        return sys.executable
+    return os.path.abspath(
+        os.path.join(ROOT, "..", "pymol-env", "python.exe"))
+
+
+PYMOL_PY = _detect_pymol_py()
 RENDER_PY = os.path.join(ROOT, "render_flat.py")
 VEC_PY = os.path.join(ROOT, "vectorize_flat.py")
 AI_PY = os.path.join(ROOT, "protein2vector_flat.py")

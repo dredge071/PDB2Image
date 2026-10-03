@@ -35,8 +35,10 @@ python app.py
 # 打开 http://127.0.0.1:5000
 ```
 
-PyMOL 环境路径默认找仓库旁的 `../pymol-env/python.exe`，可用环境变量
-`FLAT_TRACE_PYMOL_PY` 覆盖（指向 PyMOL 环境里的 python 可执行文件）。
+PyMOL 环境路径按以下顺序自动探测：环境变量 `FLAT_TRACE_PYMOL_PY` →
+当前解释器本身能 `import pymol`（单环境模式，README 安装·方案一）→
+仓库旁的 `../pymol-env/python.exe`。两环境模式一般需显式设置
+`FLAT_TRACE_PYMOL_PY`。
 
 ## 文件
 
