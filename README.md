@@ -144,14 +144,49 @@ python protein2vector_flat.py --out-dir out ^
     --svgs out/flat_mono.svg,out/flat_palette.svg --layers Chain_A,Chain_B,Chain_C
 ```
 
-## 完整分层（full layering）用法
+## 三种表现模式
 
-`--layer-mode full`（网站表单"分层方式 → full"）时，每链图层内多一个
-默认隐藏的 `Chain X full` 子组：该链单独渲染（其他链禁用、相机不变）
-并描摹的**完整**链——被遮挡部分的填色、明暗、墨线、半透明表面壳俱全。
-组装观感与 visible 模式逐字节一致；在 Illustrator 图层面板点亮
-`Chain X full` 即可就地补全，拖出该链图层即得一条完整链。
-设计细节与实测结论见 `docs/full_layering_spec.md`。
+| | cartoon | surface | both |
+|---|---|---|---|
+| 画的是什么 | 卡通（螺旋/折叠/环），按雾深分档平涂 | 分子表面壳（溶剂可及表面），不透明正常上色 | 半透明浅色表面壳罩在正常上色的卡通外 |
+| 看到什么 | 最干净的二级结构示意 | 整体轮廓、结合面、口袋形状 | 轮廓和内部结构同时可见（经典封面图风格） |
+| 图层结构 | 每链一层，层内 `Chain X cartoon` | 每链一层，层内 `Chain X surface` | 每链一层，层内 `Chain X surface`（上）+ `Chain X cartoon`（下） |
+
+各模式相关参数（网站表单 / CLI 同名）：
+
+- **cartoon 与 both 的卡通部分**：`depth-bands`（明暗档数，默认 3；1 = 纯平涂）、
+  `shade-step`（每档加深比例，默认 0.10）、`ink-color` / `ink-dilate`（墨线颜色与粗细）；
+- **both 的表面壳**：`surf-wash`（表面颜色向白色混合的比例，默认 0.25，配合
+  固定的 fill-opacity 0.4 半透明；surface 单独模式恒不透明，此参数不生效）；
+- 表面墨线自动取墨线颜色的浅灰版本，恒为常规粗细；
+- 每种模式都同时输出**彩色版** `flat_palette.svg` 和**单色版** `flat_mono.svg`
+  （单色按链逐条加深，勾选"单色模式"则主版直接单色）。
+
+## 完整分层（full layering）——both 模式的杀手锏
+
+普通分层（visible）里，每链图层只包含它"最靠前可见"的部分——拖开一层，
+被别的链挡住的部位是缺的。`分层方式 = full` 时，每链额外多做一次
+**单独渲染**（场景里只留这一条链，相机完全不动），于是被遮挡的填色、
+明暗、墨线、半透明表面壳全部都有，作为 `Chain X full` 子组收进该链图层，
+**默认隐藏**。Illustrator 里长这样（红箭头处就是默认不显示的 `Chain B full`）：
+
+<p align="center">
+  <img src="docs/images/ai_layers_full.png" width="420"
+       alt="Illustrator 图层面板：Chain X visible 之下藏着默认隐藏的 Chain X full">
+</p>
+
+使用方法：
+
+1. **就地补全**：点亮 `Chain X full` 的眼睛，这条链被遮挡的部位立即补齐
+   （cartoon 模式下该部位位于其他链的不透明卡通之下，需拖出或隐藏其他链才可见；
+   both 模式下透过半透明壳直接可见）；
+2. **拖出完整链**：把整个 Chain X 图层拖出图层面板，就是一条填色、明暗、
+   墨线、（both 的话）半透明壳俱全的**完整链**，随意摆放、改色、做爆炸图；
+3. 组装态（什么都不动）与 visible 模式**逐字节一致**，发布前不需要做任何处理。
+
+限制与细节：完整分层只在**渲染宽度 2400** 出成品时可用（其他宽度自动回退
+visible 并在日志说明），渲染时间约 +60%；设计取舍的完整记录见
+`docs/full_layering_spec.md`。
 
 ## 依赖小结
 
