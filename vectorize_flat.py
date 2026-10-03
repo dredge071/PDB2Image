@@ -379,6 +379,13 @@ def main():
                     help="stroke width in output units (2400-space)")
     ap.add_argument("--rep", choices=["cartoon", "surface", "both"],
                     default="cartoon")
+    ap.add_argument("--layer-mode", choices=["visible", "full"],
+                    default="visible",
+                    help="full = each chain additionally gets its COMPLETE "
+                         "content traced from solo renders (occluded parts "
+                         "included), wrapped in a clip path of the chain's "
+                         "visible region; release the clip in Illustrator "
+                         "to expose it. Needs the solo render channels")
     ap.add_argument("--surf-wash", type=float, default=0.25,
                     help="both mode: whiten the surface tone (pale shell)")
     ap.add_argument("--ink-dilate", type=int, default=0, choices=[0, 1],
@@ -410,6 +417,7 @@ def main():
     # both mode    : surface opaque on top, cartoon whitened below,
     #                each chain's surface+cartoon in ONE layer group
     rep = args.rep
+    full = args.layer_mode == "full"
     have_surf = rep in ("surface", "both")
     have_cart = rep in ("cartoon", "both")
 
@@ -482,17 +490,20 @@ def main():
 
     up = 4
 
-    def prep4m(m):
+    def prep4m(m, alw=None):
+        # alw=None -> the scene-wide allowed region; solo content passes
+        # the chain's own silhouette+1px instead
+        alw = allowed if alw is None else alw
         big = cv2.resize(m.astype(np.float32),
                          (m.shape[1] * up, m.shape[0] * up),
                          interpolation=cv2.INTER_LINEAR) > 0.5
-        big &= cv2.resize(allowed.astype(np.float32),
+        big &= cv2.resize(alw.astype(np.float32),
                           (m.shape[1] * up, m.shape[0] * up),
                           interpolation=cv2.INTER_NEAREST) > 0.5
         return big.astype(np.uint8) * 255
 
-    def band_paths(mask, min_area=MIN_AREA):
-        return trace_mask(prep4m(mask), min_area * up * up, 1.0 / up,
+    def band_paths(mask, alw=None, min_area=MIN_AREA):
+        return trace_mask(prep4m(mask, alw), min_area * up * up, 1.0 / up,
                           EPS * up, CORNER_DEG)
 
     def wash(c, f):
@@ -576,38 +587,159 @@ def main():
         sthr_hi = np.percentile(slum[union], 66)
         sthr_lo = np.percentile(slum[union], 33)
 
+    # ---- full layering: per-chain solo data (the complete chains) ----
+    solo_masks, solo_smasks = {}, {}
+    solo_dim, solo_slum = {}, {}
+    solo_allow, solo_surf_allow = {}, {}
+    solo_cart_ink, solo_surf_ink = {}, {}
+    if full:
+        print("[vec] layer-mode full: tracing complete chains from solo "
+              "renders", flush=True)
+        k3 = np.ones((3, 3), np.uint8)
+        for ch in chains:
+            im = load_canon(os.path.join(rd, f"solomask{ch}.png"),
+                            resample=Image.BILINEAR)
+            solo_masks[ch] = (np.array(im.convert("RGB")).min(axis=2) > 128)
+            if have_surf:
+                im = load_canon(os.path.join(rd, f"solosurfmask{ch}.png"),
+                                resample=Image.BILINEAR)
+                solo_smasks[ch] = (np.array(im.convert("RGB"))
+                                   .min(axis=2) > 128)
+            # solo depth / surface luminance are normalized with the
+            # SCENE calibration (same lo/hi), so depth tones continue
+            # seamlessly across the visible/hidden border of the chain
+            sraw = np.array(load_canon(os.path.join(rd,
+                            f"solodepth{ch}.png")).convert("L"), dtype=float)
+            solo_dim[ch] = np.clip((sraw - lo) / max(1e-6, hi - lo) * 255.0,
+                                   0, 255)
+            if have_surf:
+                sraw = np.array(load_canon(os.path.join(rd,
+                                f"solosurfshade{ch}.png")).convert("L"),
+                                dtype=float)
+                solo_slum[ch] = np.clip(
+                    (sraw - slo) / max(1e-6, shi - slo) * 255.0, 0, 255)
+            solo_allow[ch] = cv2.dilate(
+                solo_masks[ch].astype(np.uint8), k3,
+                iterations=1).astype(bool)
+            if have_surf:
+                solo_surf_allow[ch] = cv2.dilate(
+                    solo_smasks[ch].astype(np.uint8), k3,
+                    iterations=1).astype(bool)
+        for ch in chains:
+            if have_cart:
+                raw = ink_raw_of(os.path.join(rd, f"soloink{ch}.png"),
+                                 cart_target)
+                keep = cv2.dilate(solo_masks[ch].astype(np.uint8), k3,
+                                  iterations=4).astype(bool)
+                solo_cart_ink[ch] = ink_paths_keep(raw, keep)
+            if have_surf:
+                raw = ink_raw_of(os.path.join(rd, f"solosurfink{ch}.png"),
+                                 3.0)
+                keep = cv2.dilate(solo_smasks[ch].astype(np.uint8), k3,
+                                  iterations=4).astype(bool)
+                solo_surf_ink[ch] = ink_paths_keep(raw, keep)
+            print(f"[vec] solo ink {ch}: cart={len(solo_cart_ink.get(ch, []))}"
+                  f" surf={len(solo_surf_ink.get(ch, []))} paths", flush=True)
+
     def build(variant):
         """ONE layer per chain: <g id="Chain_ch"> containing that chain's
         own cartoon subgroup (inner) and surface subgroup (outer wrap).
         both mode: the surface subgroup carries fill-opacity -> the classic
         'cartoon seen through a translucent surface' figure. Single-rep
-        modes: that rep only, fully opaque."""
+        modes: that rep only, fully opaque.
+
+        full mode: beneath the visible content, the chain group also
+        carries its COMPLETE content traced from the solo renders, wrapped
+        in <g clip-path="url(#visCH)"> (the chain's visible region).
+        Assembled look is unchanged (visible content paints on top);
+        releasing the clip in Illustrator exposes the occluded parts."""
         groups = []
         for ci, ch in enumerate(chains):
+            def cart_col():
+                return (colors[ch] if variant == "palette"
+                        else "#%02X%02X%02X" % scale_hex(
+                            args.mono_color,
+                            max(0.25, 1.0 - ci * args.mono_step)))
+
             lines = [f'<g id="Chain_{ch}">']
 
-            # ---------- cartoon (inner) ----------
+            # ---------- complete chain (solo), clipped to occluded ----------
+            if full:
+                lines.append(f'<g clip-path="url(#vis{ch})">')
+                # display=none: hidden by default. The both-mode surface
+                # shell is translucent (fill-opacity 0.4) - a visible full
+                # shell would tint through the occluding chains' own
+                # translucent shells and shift the assembled colors. Hidden,
+                # the assembled render is byte-identical to visible mode
+                # (verified in Illustrator); the user enables Chain_X_full
+                # in the layers panel to complete the chain in place.
+                lines.append(f'<g id="Chain_{ch}_full" display="none">')
+                if have_cart:
+                    salw = solo_allow[ch]
+                    sfm = (cv2.dilate(solo_masks[ch].astype(np.uint8),
+                                      np.ones((3, 3), np.uint8),
+                                      iterations=4) & salw).astype(bool)
+                    fills = chain_fills(sfm, solo_dim[ch], thresholds,
+                                        cart_col(), args.shade_step,
+                                        allowed=salw)
+                    ci_ink = [(d, ink_rgb) for d in solo_cart_ink[ch]]
+                    lines.append(f'<g id="Chain_{ch}_full_cartoon">')
+                    lines += [f'<path d="{d}" fill="rgb({c[0]},{c[1]},{c[2]})"/>'
+                              for d, c in fills]
+                    lines += [f'<path d="{d}" fill="rgb({c[0]},{c[1]},{c[2]})"/>'
+                              for d, c in ci_ink]
+                    lines.append("</g>")
+                    print(f"[vec] {variant} full cart {ch}: "
+                          f"{len(fills)} paths", flush=True)
+                if have_surf:
+                    base = (hex_to_rgb(colors[ch]) if variant == "palette"
+                            else scale_hex(args.mono_color,
+                                           max(0.25, 1.0 - ci * args.mono_step)))
+                    if rep == "both":
+                        base = wash(base, args.surf_wash)
+                    mid = tuple(int(v * 0.94) for v in base)
+                    dark = tuple(int(v * 0.85) for v in base)
+                    s_sm = solo_smasks[ch]
+                    s_lum = solo_slum[ch]
+                    alw = solo_surf_allow[ch]
+                    fills = ([(d, base) for d in band_paths(s_sm, alw)]
+                             + [(d, mid) for d in
+                                band_paths(s_sm & (s_lum < sthr_hi), alw)]
+                             + [(d, dark) for d in
+                                band_paths(s_sm & (s_lum < sthr_lo), alw)])
+                    si = [(d, surf_ink_rgb) for d in solo_surf_ink[ch]]
+                    op = ' fill-opacity="0.4"' if rep == "both" else ""
+                    lines.append(f'<g id="Chain_{ch}_full_surface"{op}>')
+                    lines += [f'<path d="{d}" fill="rgb({c[0]},{c[1]},{c[2]})"/>'
+                              for d, c in fills]
+                    lines += [f'<path d="{d}" fill="rgb({c[0]},{c[1]},{c[2]})"/>'
+                              for d, c in si]
+                    lines.append("</g>")
+                    print(f"[vec] {variant} full surf {ch}: "
+                          f"{len(fills)} paths", flush=True)
+                lines.append("</g>")        # Chain_ch_full
+                lines.append("</g>")        # clip wrapper
+
+            # ---------- visible content (original logic) ----------
+            vis = [f'<g id="Chain_{ch}_visible">'] if full else []
+
             if have_cart:
-                col_hex = (colors[ch] if variant == "palette"
-                           else "#%02X%02X%02X" % scale_hex(
-                               args.mono_color,
-                               max(0.25, 1.0 - ci * args.mono_step)))
+                col_hex = cart_col()
                 m = masks[ch].astype(np.uint8)
                 grown = cv2.dilate(m, np.ones((3, 3), np.uint8), iterations=4)
                 fm = (grown & allowed).astype(bool)
                 fills = chain_fills(fm, dim, thresholds, col_hex,
                                     args.shade_step, allowed=allowed)
                 ci_ink = [(d, ink_rgb) for d in cart_ink[ch]]
-                lines.append(f'<g id="Chain_{ch}_cartoon">')
-                lines += [f'<path d="{d}" fill="rgb({c[0]},{c[1]},{c[2]})"/>'
-                          for d, c in fills]
-                lines += [f'<path d="{d}" fill="rgb({c[0]},{c[1]},{c[2]})"/>'
-                          for d, c in ci_ink]
-                lines.append("</g>")
+                vis.append(f'<g id="Chain_{ch}_cartoon">')
+                vis += [f'<path d="{d}" fill="rgb({c[0]},{c[1]},{c[2]})"/>'
+                        for d, c in fills]
+                vis += [f'<path d="{d}" fill="rgb({c[0]},{c[1]},{c[2]})"/>'
+                        for d, c in ci_ink]
+                vis.append("</g>")
                 print(f"[vec] {variant} cart {ch}: {len(fills)} paths",
                       flush=True)
 
-            # ---------- surface (outer wrap) ----------
             if have_surf:
                 base = (hex_to_rgb(colors[ch]) if variant == "palette"
                         else scale_hex(args.mono_color,
@@ -623,16 +755,19 @@ def main():
                           band_paths(smasks[ch] & (slum < sthr_lo))]
                 si = [(d, surf_ink_rgb) for d in surf_ink[ch]]
                 op = ' fill-opacity="0.4"' if rep == "both" else ""
-                lines.append(f'<g id="Chain_{ch}_surface"{op}>')
-                lines += [f'<path d="{d}" fill="rgb({c[0]},{c[1]},{c[2]})"/>'
-                          for d, c in fills]
-                lines += [f'<path d="{d}" fill="rgb({c[0]},{c[1]},{c[2]})"/>'
-                          for d, c in si]
-                lines.append("</g>")
+                vis.append(f'<g id="Chain_{ch}_surface"{op}>')
+                vis += [f'<path d="{d}" fill="rgb({c[0]},{c[1]},{c[2]})"/>'
+                        for d, c in fills]
+                vis += [f'<path d="{d}" fill="rgb({c[0]},{c[1]},{c[2]})"/>'
+                        for d, c in si]
+                vis.append("</g>")
                 print(f"[vec] {variant} surf {ch}: {len(fills)} paths",
                       flush=True)
 
-            lines.append("</g>")
+            lines += vis
+            if full:
+                lines.append("</g>")        # Chain_ch_visible
+            lines.append("</g>")            # Chain_ch
             groups.append(lines)
         return groups
 
@@ -646,7 +781,42 @@ def main():
     clip_defs = ['<defs><clipPath id="silhouette">']
     for d in clip_d:
         clip_defs.append(f'<path d="{d}"/>')
-    clip_defs.append('</clipPath></defs>')
+    if full:
+        # per-chain clip = the chain's OCCLUDED region (solo extent minus
+        # its visible region, +1px to tuck under the visible content's
+        # edge). Why not the visible region (as first planned): the both-
+        # mode surface shell is translucent (fill-opacity 0.4); a full
+        # shell inside the visible region would paint the same pixels
+        # twice (0.4 over 0.4) and visibly darken every shell. Confined
+        # to the occluded pockets instead, the full content hides beneath
+        # the occluding chains' opaque cartoons, so the assembled look is
+        # untouched; releasing the clip exposes exactly the missing parts
+        # (the +1px overlap keeps the released figure seam-free).
+        # (visible mode keeps the exact legacy defs string for
+        # byte-identical output)
+        clip_defs.append('</clipPath>')
+        k3 = np.ones((3, 3), np.uint8)
+        for ch in chains:
+            vu = masks[ch].copy()
+            if have_surf:
+                vu |= smasks[ch]
+            su = solo_masks[ch].copy()
+            if have_surf:
+                su |= solo_smasks[ch]
+            occ = su & ~vu
+            occ = cv2.dilate(occ.astype(np.uint8), k3,
+                             iterations=1).astype(bool)
+            big_v = cv2.resize(vu.astype(np.float32), (w4, h4),
+                               interpolation=cv2.INTER_LINEAR) > 0.5
+            cd = trace_mask(big_v.astype(np.uint8) * 255, MIN_AREA * up * up,
+                            1.0 / up, EPS * up, CORNER_DEG)
+            clip_defs.append(f'<clipPath id="vis{ch}">')
+            clip_defs += [f'<path d="{d}"/>' for d in cd]
+            clip_defs.append('</clipPath>')
+            print(f"[vec] clip vis{ch}: {len(cd)} contours", flush=True)
+        clip_defs.append('</defs>')
+    else:
+        clip_defs.append('</clipPath></defs>')
     clip_attr = ' clip-path="url(#silhouette)"'
 
     for suffix, groups in (("_palette", build("palette")),
@@ -665,9 +835,16 @@ def main():
     import fitz
     for suffix in ("_palette", "_mono"):
         svg = open(args.out_prefix + suffix + ".svg", encoding="utf-8").read()
-        i0 = svg.find('<g id="Chain_')
-        i1 = svg.rfind("</g>")            # close of the last chain group
-        fills = svg[i0:i1 + 4] if i0 != -1 else ""
+        if full:
+            # audit only the VISIBLE content: in full mode the chain
+            # groups also carry the clipped solo content, which MuPDF
+            # cannot clip (it ignores clipPath)
+            fills = "".join(m.group(0) for m in _re.finditer(
+                r'<g id="Chain_\w+_visible">.*?</g>\s*</g>', svg, _re.S))
+        else:
+            i0 = svg.find('<g id="Chain_')
+            i1 = svg.rfind("</g>")            # close of the last chain group
+            fills = svg[i0:i1 + 4] if i0 != -1 else ""
         mini = ('<svg xmlns="http://www.w3.org/2000/svg" '
                 f'width="{size[0]}" height="{size[1]}" '
                 f'viewBox="0 0 {size[0]} {size[1]}">'

@@ -13,6 +13,7 @@
 | `mono`（单色模式） | 开关 | false | 全部模式 | 所有链用同一颜色（取颜色选择器第一格） |
 | `width`（渲染宽度） | 整数（800~4800） | 2400 | 全部模式 | 1x 渲染宽度（px）。掩膜/深度通道自动渲染 2x；mode-1 墨线通道固定 1x（线宽固定，放大相对变细会断线）。surface 通道很慢，预览可用 1200 |
 | `height`（渲染高度） | 整数（600~4300） | 2132 | 全部模式 | 1x 渲染高度（px），一般保持 2400:2132 的默认比例 |
+| `layer-mode`（分层方式） | 选项：visible/full | visible | 全部模式 | visible=仅可见（当前行为）：每链图层只含最靠前的可见部分；full=完整分层：每链额外 solo 渲染完整链（被遮挡部分也在），AI 里释放该链的剪贴蒙版即可看到完整链，组装观感不变。仅 2400 宽度可用，其他宽度自动回退 visible；渲染时间约 +60% |
 | `view`（视角） | 选项：auto/orient | auto | 全部模式 | auto=按链质心自动摆正三聚体（>=3 链）；orient=PyMOL orient |
 | `workers`（并行渲染进程数） | 整数（1~12） | 0 | 全部模式 | 渲染通道拆给几个 PyMOL 进程（0=自动，默认 4）。每个进程约占 1GB 内存；1=串行。CPU 核多内存大可加大，近似线性加速 |
 | `view-angles`（视角微调） | 文本 | （空） | 全部模式 | 在上述视角基础上绕 x,y,z 各旋转的度数，如 0,15,0；留空不转 |
@@ -56,6 +57,8 @@
 | vectorize | 按链墨线分配 | 全场景按最近链划分领土（各链掩膜外扩生长 16 轮），每链只临摹自己领土内的墨线 |
 | vectorize | 表面明暗分档阈值 | surfshade 亮度在 union 内的 66/33 百分位 |
 | vectorize | 剪影 clipPath | silhouette（4x 描摹）；MuPDF 预览不支持，以 Illustrator 为准 |
+| render | 完整分层 solo 通道（--layer-mode full） | 每链追加 solomask/solodepth/soloink（surface/both 再加 solosurfmask/solosurfshade/solosurfink），该链单独在场景中渲染（其他链 disable），相机不变、像素对齐；仅 2400 出成品时可用，其他宽度自动回退 visible |
+| vectorize | 完整分层 SVG 结构 | full 模式每链组内含 <g clip-path=url(#vis链)> 包裹的 Chain_链_full（display=none 默认隐藏）+ 原有可见内容。clip=该链被遮挡区外扩1px；AI 里点亮 Chain 链 full 子组即就地补全被遮挡部分（组装态与 visible 模式逐字节一致） |
 | export | 保存选项 | IllustratorSaveOptions pdfCompatible=true；超时 1200s；图层名 = Chain_<链号>（AI 导入时 _ 转空格，脚本已处理） |
 
 ## 五、输出文件一览（每次任务目录内）

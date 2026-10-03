@@ -146,9 +146,15 @@ def run_job(job_id, form, pdb_path):
             total = 3 if p["export_ai"] else 2
             rd = os.path.join(jd, "render")
             os.makedirs(rd, exist_ok=True)
+            layer_mode = p.get("layer_mode") or "visible"
+            if layer_mode == "full" and p["width"] < 2400:
+                layer_mode = "visible"
+                log(job, "完整分层（full）仅在渲染宽度 2400 下可用，"
+                         "本次已自动回退为『仅可见』")
             log(job, f"━━ 第 1/{total} 步 · PyMOL 渲染 ━━")
             args = [PYMOL_PY, RENDER_PY, "--pdb", pdb_path,
                     "--out-dir", rd, "--rep", p["rep"],
+                    "--layer-mode", layer_mode,
                     "--view", p["view"],
                     "--width", p["width"], "--height", p["height"]]
             if form.get("chains", "").strip():
@@ -169,6 +175,7 @@ def run_job(job_id, form, pdb_path):
                     "--renders-dir", rd, "--chains", ",".join(chains),
                     "--out-prefix", os.path.join(jd, "flat"),
                     "--rep", p["rep"],
+                    "--layer-mode", layer_mode,
                     "--colors", ";".join(f"{ch}:{c}"
                                          for ch, c in zip(chains, cols)),
                     "--depth-bands", p["depth_bands"],

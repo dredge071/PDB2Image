@@ -22,6 +22,14 @@ Outputs (in --out-dir):
   prev.png       1x  flat color raster preview (white bg)
   surfmask{CH}.png / surfshade.png / surfink.png  surface passes
 
+Full layering (--layer-mode full) adds per-chain SOLO channels rendered
+with every other chain disabled (the complete chain, occluded parts
+included). The camera never changes, so solo channels stay pixel-aligned
+with the scene channels:
+  solomask{CH}.png / solodepth{CH}.png / soloink{CH}.png   cartoon
+  solosurfmask{CH}.png / solosurfshade{CH}.png / solosurfink{CH}.png
+                                                           surface passes
+
 CLI:
   --pdb PATH --out-dir DIR
   --chains A,B,C          (default: all ATOM chains)
@@ -30,6 +38,7 @@ CLI:
   --width 2400 --height 2132
   --view auto|orient --view-angles rx,ry,rz
   --rep cartoon|surface|both
+  --layer-mode visible|full  (full = extra per-chain solo channels)
   --workers 0
   --specs maskA,depth     (internal: worker subset; empty = all)
 """
@@ -243,6 +252,70 @@ def render_spec(spec, args, chains, all_cart, all_surf):
         snap(rf"{od}\surfink.png", args.width, args.height, True, "black")
         cmd.set("ray_trace_mode", 0)
 
+    # ---- full-layering solo channels: this chain alone in the scene ----
+    elif spec.startswith("solomask"):
+        ch = spec[len("solomask"):]
+        flat_light()
+        cmd.color("white", f"cart{ch}")
+        enable_only([f"cart{ch}"])
+        snap(rf"{od}\solomask{ch}.png", W2, H2, True, "black")
+
+    elif spec.startswith("solodepth"):
+        ch = spec[len("solodepth"):]
+        flat_light()
+        cmd.color("white", f"cart{ch}")
+        enable_only([f"cart{ch}"])
+        cmd.set("depth_cue", 1)
+        cmd.set("fog", 1)
+        cmd.set("fog_start", 0.0)   # same fog slab as the scene depth pass
+        snap(rf"{od}\solodepth{ch}.png", W2, H2, True, "black")
+        cmd.set("depth_cue", 0)
+        cmd.set("fog", 0)
+
+    elif spec.startswith("soloink"):
+        ch = spec[len("soloink"):]
+        cmd.set("ambient", 0.35)
+        cmd.set("direct", 0.65)
+        cmd.set("specular", 0.0)
+        cmd.set("depth_cue", 0)
+        cmd.set("fog", 0)
+        cmd.set("gamma", 1.0)
+        cmd.set("ray_trace_mode", 1)
+        cmd.color("black", f"cart{ch}")
+        enable_only([f"cart{ch}"])
+        snap(rf"{od}\soloink{ch}.png", args.width, args.height, True, "black")
+        cmd.set("ray_trace_mode", 0)
+
+    elif spec.startswith("solosurfmask"):
+        ch = spec[len("solosurfmask"):]
+        flat_light()
+        cmd.color("white", f"surf{ch}")
+        enable_only([f"surf{ch}"])
+        snap(rf"{od}\solosurfmask{ch}.png", W2, H2, True, "black")
+
+    elif spec.startswith("solosurfshade"):
+        ch = spec[len("solosurfshade"):]
+        cmd.color("white", f"surf{ch}")
+        enable_only([f"surf{ch}"])
+        cmd.set("ambient", 0.45)
+        cmd.set("direct", 0.55)
+        cmd.set("specular", 0.0)
+        cmd.set("depth_cue", 0)
+        cmd.set("fog", 0)
+        cmd.set("gamma", 1.0)
+        cmd.set("ray_trace_mode", 0)
+        snap(rf"{od}\solosurfshade{ch}.png", W2, H2, True, "black")
+
+    elif spec.startswith("solosurfink"):
+        ch = spec[len("solosurfink"):]
+        flat_light()
+        cmd.set("ray_trace_mode", 1)
+        cmd.color("black", f"surf{ch}")
+        enable_only([f"surf{ch}"])
+        snap(rf"{od}\solosurfink{ch}.png", args.width, args.height, True,
+             "black")
+        cmd.set("ray_trace_mode", 0)
+
     elif spec.startswith("mask"):
         ch = spec[len("mask"):]
         flat_light()
@@ -354,6 +427,15 @@ def build_specs(args, chains):
     if args.rep in ("surface", "both"):
         specs += [f"surfmask{ch}" for ch in chains]
         specs += ["surfshade", "surfink"]
+    if args.layer_mode == "full":
+        # solo = this chain alone: the complete chain (occluded parts in)
+        specs += [f"solomask{ch}" for ch in chains]
+        specs += [f"solodepth{ch}" for ch in chains]
+        specs += [f"soloink{ch}" for ch in chains]
+        if args.rep in ("surface", "both"):
+            specs += [f"solosurfmask{ch}" for ch in chains]
+            specs += [f"solosurfshade{ch}" for ch in chains]
+            specs += [f"solosurfink{ch}" for ch in chains]
     return specs
 
 
@@ -370,6 +452,10 @@ def parse_args():
     ap.add_argument("--view-angles", default="")
     ap.add_argument("--rep", choices=["cartoon", "surface", "both"],
                     default="cartoon")
+    ap.add_argument("--layer-mode", choices=["visible", "full"],
+                    default="visible",
+                    help="full = also render per-chain solo channels "
+                         "(complete chains for full layering)")
     ap.add_argument("--workers", type=int, default=0,
                     help="parallel PyMOL workers; 0 = auto (4), "
                          "1 = single sequential session")
@@ -381,7 +467,7 @@ def parse_args():
 
 def run_batch(args, chains, colors, specs):
     """One PyMOL session: set up state once, render its channels."""
-    have_surf = any(s.startswith("surf") for s in specs)
+    have_surf = any("surf" in s for s in specs)   # also solo surf channels
     all_cart, all_surf = setup_session(args, chains, colors, have_surf)
     for spec in specs:
         render_spec(spec, args, chains, all_cart, all_surf)
@@ -413,11 +499,11 @@ def main():
     # first (surface passes cost ~2x a cartoon pass); deterministic order
     batches = [[] for _ in range(workers)]
     load = [0.0] * workers
-    for spec in sorted(specs, key=lambda s: (-(2.0 if s.startswith("surf")
+    for spec in sorted(specs, key=lambda s: (-(2.0 if "surf" in s
                                               else 1.0), specs.index(s))):
         i = load.index(min(load))
         batches[i].append(spec)
-        load[i] += 2.0 if spec.startswith("surf") else 1.0
+        load[i] += 2.0 if "surf" in spec else 1.0
     procs = []
     for b in batches:
         argv = [sys.executable, os.path.abspath(__file__),
@@ -428,6 +514,7 @@ def main():
                 "--mono", str(args.mono),
                 "--width", str(args.width), "--height", str(args.height),
                 "--view", args.view, "--rep", args.rep,
+                "--layer-mode", args.layer_mode,
                 "--workers", "1", "--specs", ",".join(b)]
         if args.view_angles:
             argv += ["--view-angles", args.view_angles]

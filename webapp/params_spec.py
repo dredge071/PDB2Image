@@ -57,6 +57,14 @@ SPEC = [
     dict(id="height", stage="render", type="int", default=2132,
          min=600, max=4300, step=100, label="渲染高度",
          desc="1x 渲染高度（px），一般保持 2400:2132 的默认比例"),
+    dict(id="layer_mode", stage="render", type="select",
+         options=["visible", "full"], default="visible",
+         label="分层方式",
+         desc="visible=仅可见（当前行为）：每链图层只含最靠前的可见部分；"
+              "full=完整分层：每链额外 solo 渲染完整链（被遮挡部分也在），"
+              "AI 里释放该链的剪贴蒙版即可看到完整链，组装观感不变。"
+              "仅 2400 宽度可用，其他宽度自动回退 visible；渲染时间约 +60%",
+         cli="layer-mode"),
     dict(id="view", stage="render", type="select",
          options=["auto", "orient"], default="auto", label="视角",
          desc="auto=按链质心自动摆正三聚体（>=3 链）；orient=PyMOL orient"),
@@ -153,6 +161,16 @@ INTERNAL = [
          value="surfshade 亮度在 union 内的 66/33 百分位"),
     dict(stage="vectorize", name="剪影 clipPath",
          value="silhouette（4x 描摹）；MuPDF 预览不支持，以 Illustrator 为准"),
+    dict(stage="render", name="完整分层 solo 通道（--layer-mode full）",
+         value="每链追加 solomask/solodepth/soloink（surface/both 再加 "
+               "solosurfmask/solosurfshade/solosurfink），该链单独在场景中"
+               "渲染（其他链 disable），相机不变、像素对齐；仅 2400 出成品"
+               "时可用，其他宽度自动回退 visible"),
+    dict(stage="vectorize", name="完整分层 SVG 结构",
+         value="full 模式每链组内含 <g clip-path=url(#vis链)> 包裹的 "
+               "Chain_链_full（display=none 默认隐藏）+ 原有可见内容。"
+               "clip=该链被遮挡区外扩1px；AI 里点亮 Chain 链 full 子组"
+               "即就地补全被遮挡部分（组装态与 visible 模式逐字节一致）"),
     dict(stage="export", name="保存选项",
          value="IllustratorSaveOptions pdfCompatible=true；超时 1200s；"
                "图层名 = Chain_<链号>（AI 导入时 _ 转空格，脚本已处理）"),

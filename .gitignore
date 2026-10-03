@@ -4,3 +4,4 @@ webapp/__pycache__/
 out2/
 archive/
 *.pyc
+_accept/

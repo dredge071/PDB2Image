@@ -27,11 +27,12 @@ surface 子组；cartoon / surface / both 三种表现模式可选。
 命令行方式：
 
 ```bash
-# ① 渲染（约数分钟；both 模式表面通道最慢）
+# ① 渲染（约数分钟；both 模式表面通道最慢；--layer-mode full 追加每链
+#    solo 通道做完整分层，仅 2400 出成品时用，其他宽度自动回退）
 D:\A_task\1_Project\1_picture\pymol-env\python.exe render_flat.py ^
     --pdb 6SZW_ABC.pdb --out-dir out2 --rep both --width 2400
 
-# ② 矢量化（输出画布固定 2400 规范空间）
+# ② 矢量化（输出画布固定 2400 规范空间；--layer-mode full 与渲染端一致）
 C:\Python314\python.exe vectorize_flat.py --renders-dir out2 ^
     --chains A,B,C --out-prefix out2/flat --rep both
 
