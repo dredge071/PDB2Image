@@ -1,0 +1,16 @@
+cff-version: 1.2.0
+message: "If you use flat_trace in your work, please cite it as below."
+title: "flat_trace: from flat-shaded PyMOL renders to layered vector figures of protein structures"
+authors:
+  - alias: dredge071
+version: v0.1
+date-released: 2026-10-03
+repository-code: "https://github.com/dredge071/flat_trace"
+type: software
+keywords:
+  - structural biology
+  - molecular illustration
+  - PyMOL
+  - SVG
+  - Adobe Illustrator
+  - scientific figure

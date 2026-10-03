@@ -27,9 +27,23 @@ surface 子组；cartoon / surface / both 三种表现模式可选。可选
    pip install -r webapp/requirements.txt
    ```
 
-2. **PyMOL 环境**：渲染在独立的 PyMOL 环境中运行（如 conda 安装的
-   `pymol` 或 open-source PyMOL 的 venv，环境名叫 `pymol-env` 会被自动
-   发现，也可以任意命名后用环境变量指定，见下节）。
+2. **PyMOL 环境**：渲染在独立的 PyMOL 环境中运行（与主环境隔离，
+   因为 PyMOL 自带一套特定版本的 numpy 等）。推荐用 conda 装开源版：
+
+   ```bash
+   # 方式 A（零配置）：把环境建在仓库旁边、命名为 pymol-env，
+   # flat_trace 会自动找到 ../pymol-env/python.exe
+   cd <flat_trace 所在目录>
+   conda create -p ../pymol-env -c conda-forge pymol-open-source
+
+   # 方式 B：环境建在任意位置（如常规的 conda env），手动指定路径
+   conda create -n pymol -c conda-forge pymol-open-source
+   # 然后设置环境变量（Windows 示例）：
+   #   set FLAT_TRACE_PYMOL_PY=%CONDA_PREFIX%\envs\pymol-env\python.exe
+   ```
+
+   已有能 `import pymol` 的 Python 环境（如官方安装版）也可以直接把
+   它的 python 路径填给 `FLAT_TRACE_PYMOL_PY`，无需 conda。
 
 3. **（可选）分层 .ai 导出**：仅 Windows + 已装 Adobe Illustrator
    （COM 接口）。不需要 .ai 时可完全忽略。
@@ -79,3 +93,17 @@ python protein2vector_flat.py --out-dir out ^
 - 矢量化 / 网站：numpy、opencv-python、pillow、pymupdf、flask（见 `webapp/requirements.txt`）
 - .ai 导出：Windows + 本机 Adobe Illustrator（COM）；导出结束后自动关闭 Illustrator
 - 自包含：`vec_core.py` 内置全部描摹原语，仓库不依赖其他项目目录
+
+## 引用
+
+如果 flat_trace 对你的工作有帮助，欢迎在成果中引用它：
+
+> dredge071. flat_trace: from flat-shaded PyMOL renders to layered
+> vector (SVG / Adobe Illustrator) figures of protein structures.
+> https://github.com/dredge071/flat_trace
+
+（GitHub 仓库首页的 "Cite this repository" 按钮可直接导出 BibTeX。）
+
+## 许可证
+
+见 [LICENSE](LICENSE)。
