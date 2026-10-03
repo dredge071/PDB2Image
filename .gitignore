@@ -5,3 +5,5 @@ out2/
 archive/
 *.pyc
 _accept/
+out/
+ai_preview.*

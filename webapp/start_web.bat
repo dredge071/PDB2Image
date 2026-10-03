@@ -1,8 +1,9 @@
 @echo off
 rem Launch the flat_trace web tool and open the browser.
-rem Override the interpreter with:  set PY=D:\path\to\python.exe
+rem Interpreter resolution order:  PY env var  >  FLAT_TRACE_PYTHON  >  python on PATH
 cd /d %~dp0
-if not defined PY set PY=C:\Python314\python.exe
+if not defined PY if defined FLAT_TRACE_PYTHON set PY=%FLAT_TRACE_PYTHON%
+if not defined PY set PY=python.exe
 
 rem already running?
 netstat -ano | findstr /C:":5000 " | findstr /C:"LISTENING" >nul

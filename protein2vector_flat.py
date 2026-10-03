@@ -1,10 +1,10 @@
 """flat_trace main pipeline: render -> vectorize -> AI export.
 
 Run:
-  pymol-env/python.exe render_flat.py --pdb X.pdb --out-dir out --rep both
-  C:/Python314/python.exe  vectorize_flat.py --renders-dir out
+  python render_flat.py --pdb X.pdb --out-dir out --rep both   (PyMOL env)
+  python vectorize_flat.py --renders-dir out
       --chains A,B,C --out-prefix out/flat --rep both
-  C:/Python314/python.exe  protein2vector_flat.py --out-dir out
+  python protein2vector_flat.py --out-dir out
       --svgs out/flat_palette.svg,out/flat_mono.svg --rep both
 """
 import argparse

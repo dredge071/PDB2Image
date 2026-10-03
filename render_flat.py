@@ -1,7 +1,7 @@
 """flat_trace branch: trace line-art from PyMOL + layered flat fills.
 
 No lighting, no gradients, no ray-traced shading: ambient 1 / direct 0.
-Run with the pymol-env python. Branch copy of protein2vector/steps/
+Run with a PyMOL environment's python. Branch copy of protein2vector/steps/
 render_pass.py helpers (working scripts untouched).
 
 The ~18 render channels (per-chain masks, depth, SSE, shades, ink, prev,

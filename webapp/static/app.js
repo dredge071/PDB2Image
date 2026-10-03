@@ -293,7 +293,7 @@ document.addEventListener("click", e => {
   SPEC = d.spec; ENV = d.env;
   buildForm();
   $("#envBadge").textContent =
-    (ENV.pymol_python ? "pymol-env ✓" : "pymol-env ✗") +
+    (ENV.pymol_python ? "PyMOL ✓" : "PyMOL ✗") +
     (ENV.illustrator ? " · Illustrator ✓" : " · 无 .ai 导出");
   loadResources();
   showPlaceholder();

@@ -3,7 +3,7 @@
   upload PDB -> PyMOL render (pymol-env) -> vectorize (this interpreter)
   -> optional layered .ai export via Illustrator COM.
 
-Run:  C:/Python314/python.exe app.py   (http://127.0.0.1:5000)
+Run:  python app.py   (http://127.0.0.1:5000)
 
 Jobs run one at a time in a background thread; the browser polls
 /api/jobs/<id> for stage + log. Every artifact stays inside
@@ -28,7 +28,8 @@ from params_spec import SPEC, INTERNAL            # noqa: E402
 
 PYMOL_PY = os.environ.get(
     "FLAT_TRACE_PYMOL_PY",
-    r"D:\A_task\1_Project\1_picture\pymol-env\python.exe")
+    # default: a "pymol-env" venv sitting next to this repository
+    os.path.abspath(os.path.join(ROOT, "..", "pymol-env", "python.exe")))
 RENDER_PY = os.path.join(ROOT, "render_flat.py")
 VEC_PY = os.path.join(ROOT, "vectorize_flat.py")
 AI_PY = os.path.join(ROOT, "protein2vector_flat.py")

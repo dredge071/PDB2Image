@@ -9,8 +9,8 @@
 浏览器（static/ 单页，参数表单由 params_spec.py 自动生成）
    │  upload pdb + form
    ▼
-Flask 后端（app.py，C:\Python314，任务后台线程，一次跑一个）
-   ├─ 阶段① 渲染   : 子进程 pymol-env/python.exe render_flat.py   （需 PyMOL）
+Flask 后端（app.py，任务后台线程，一次跑一个）
+   ├─ 阶段① 渲染   : 子进程 PyMOL 环境 python render_flat.py   （需 PyMOL）
    ├─ 阶段② 矢量化 : 子进程 本解释器          vectorize_flat.py
    └─ 阶段③ .ai    : 子进程 protein2vector_flat.py → Illustrator COM（可选）
    │
@@ -30,13 +30,13 @@ numpy/OpenCV、.ai 导出依赖本机 Illustrator COM，这些都只能在本地
 手动方式：
 
 ```bash
-cd D:\A_task\1_Project\1_picture\flat_trace\webapp
-C:\Python314\python.exe app.py
+cd webapp
+python app.py
 # 打开 http://127.0.0.1:5000
 ```
 
-PyMOL 环境路径默认 `D:\A_task\1_Project\1_picture\pymol-env\python.exe`，
-可用环境变量 `FLAT_TRACE_PYMOL_PY` 覆盖。
+PyMOL 环境路径默认找仓库旁的 `../pymol-env/python.exe`，可用环境变量
+`FLAT_TRACE_PYMOL_PY` 覆盖（指向 PyMOL 环境里的 python 可执行文件）。
 
 ## 文件
 

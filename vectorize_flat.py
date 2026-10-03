@@ -16,7 +16,7 @@ FIXES relative to v7:
   - no loose endpoint bridging (the other chord source).
   - stroke width 1.0.
 
-Run:  C:/Python314/python.exe vectorize_flat.py --renders-dir out
+Run:  python vectorize_flat.py --renders-dir out
       --chains A,B,C --out-prefix out/flat --compare out/compare.png
 """
 import argparse
