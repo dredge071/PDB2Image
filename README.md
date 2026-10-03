@@ -103,7 +103,14 @@ conda create -n pymol -c conda-forge pymol-open-source
 双击 webapp\start_web.bat            → http://127.0.0.1:5000
 ```
 
-网页工具长这样——左边参数表单，右边实时预览和产物下载：
+网页工具长这样——上传结构、填参数、点运行、看结果，四步一张页：
+
+<p align="center">
+  <img src="docs/images/preview_webui_home.png" width="800"
+       alt="flat_trace 网页工具主页：① 上传结构 ② 参数 ③ 运行 ④ 结果">
+</p>
+
+跑起来后左边参数表单、右边实时预览和产物下载：
 
 <p align="center">
   <img src="docs/images/preview_webui.png" width="800"
