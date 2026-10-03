@@ -5,6 +5,10 @@ var OUTDIR = "{{OUTDIR}}";
 var report = "";
 function log(s) { report += s + "\n"; }
 
+// suppress modal alerts (e.g. the SVG-import "clipping will be lost"
+// warning): an unattended modal dialog blocks the COM call forever
+app.userInteractionLevel = UserInteractionLevel.DONTDISPLAYALERTS;
+
 var JOBS = {{JOBS}};
 
 var opts = new IllustratorSaveOptions();
