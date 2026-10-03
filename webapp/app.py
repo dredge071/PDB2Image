@@ -210,7 +210,7 @@ def run_job(job_id, form, pdb_path):
 
             # ---------- stage 3 (optional): Illustrator .ai ----------
             if p["export_ai"]:
-                if not illustrator_available():
+                if not illustrator_available(probe=True):
                     raise RuntimeError(
                         "未检测到可用的 Illustrator COM（未安装，或安装后未在"
                         "系统注册表注册——部分精简版/绿色版会这样）。"
@@ -262,9 +262,12 @@ def index():
 
 @app.get("/api/params")
 def api_params():
+    # illustrator=None: deliberately NOT probed here - probing launches
+    # Illustrator; it is checked (and closed again) when an export runs
     return jsonify(spec=SPEC, internal=INTERNAL,
                    env={"pymol_python": os.path.exists(PYMOL_PY),
-                        "illustrator": illustrator_available()})
+                        "illustrator": None,
+                        "illustrator_os": os.name == "nt"})
 
 
 PER_WORKER_GB = 1.0      # rough RAM footprint of one PyMOL worker
@@ -272,27 +275,54 @@ PER_WORKER_GB = 1.0      # rough RAM footprint of one PyMOL worker
 _ai_com_cache = None     # None = not probed yet
 
 
-def illustrator_available():
+def _run_capture(cmd):
+    """subprocess.run with text output that survives the system's GBK
+    codepage (tasklist etc. print localized text; default utf-8 decoding
+    crashes the reader thread and loses the output)."""
+    return subprocess.run(cmd, capture_output=True, text=True,
+                          encoding="mbcs", errors="replace")
+
+
+def _illustrator_running():
+    if os.name != "nt":
+        return False
+    p = _run_capture(["tasklist", "/FI", "IMAGENAME eq Illustrator.exe"])
+    return "Illustrator.exe" in (p.stdout or "")
+
+
+def illustrator_available(probe=False):
     """Whether Illustrator can actually be driven. Being installed is not
     enough: some installs are missing the COM registration, and then
-    CreateObject("Illustrator.Application") fails at export time. Probe
-    it once (a throwaway VBS) and cache the answer."""
+    CreateObject("Illustrator.Application") fails at export time.
+
+    The COM check LAUNCHES Illustrator, so it is never done just to
+    decorate a badge: only on demand (probe=True, i.e. an actual .ai
+    export is about to run). If the probe started Illustrator itself,
+    it is closed again right away - an Illustrator the user had open
+    is left alone."""
     global _ai_com_cache
     if os.name != "nt":
         return False
-    if _ai_com_cache is None:
-        import tempfile
-        vbs = os.path.join(tempfile.gettempdir(), "flat_ai_probe.vbs")
-        with open(vbs, "w") as fh:
-            fh.write('On Error Resume Next\n'
-                     'CreateObject("Illustrator.Application")\n'
-                     'If Err.Number <> 0 Then WScript.Quit 1\n')
-        try:
-            r = subprocess.run(["cscript", "//nologo", vbs],
-                               capture_output=True, timeout=120)
-            _ai_com_cache = (r.returncode == 0)
-        except (OSError, subprocess.TimeoutExpired):
-            _ai_com_cache = False
+    if _ai_com_cache is not None:
+        return _ai_com_cache
+    if not probe:                       # unknown until needed
+        return True                     # assume OK; real check at export
+    import tempfile
+    was_running = _illustrator_running()
+    vbs = os.path.join(tempfile.gettempdir(), "flat_ai_probe.vbs")
+    with open(vbs, "w") as fh:
+        fh.write('On Error Resume Next\n'
+                 'CreateObject("Illustrator.Application")\n'
+                 'If Err.Number <> 0 Then WScript.Quit 1\n')
+    try:
+        r = subprocess.run(["cscript", "//nologo", vbs],
+                           capture_output=True, text=True,
+                           encoding="mbcs", errors="replace", timeout=180)
+        _ai_com_cache = (r.returncode == 0)
+    except (OSError, subprocess.TimeoutExpired):
+        _ai_com_cache = False
+    if not was_running and _illustrator_running():
+        _run_capture(["taskkill", "/IM", "Illustrator.exe", "/F"])
     return _ai_com_cache
 
 
@@ -507,7 +537,7 @@ def api_export_ai(job_id):
         return jsonify(error="任务不存在或未完成"), 400
     if os.name != "nt":
         return jsonify(error="仅 Windows 支持 Illustrator 导出"), 400
-    if not illustrator_available():
+    if not illustrator_available(probe=True):
         return jsonify(error="未检测到可用的 Illustrator COM（未安装或未注册）"), 400
 
     def work():

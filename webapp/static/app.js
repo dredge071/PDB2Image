@@ -153,7 +153,8 @@ $("#jobHistory").addEventListener("change", async e => {
   $("#downloads").innerHTML = (j.files || []).map(f =>
     `<a href="/jobs/${id}/${f}" download>${f}</a>`).join("");
   $("#aiBtn").classList.toggle("hidden",
-    (j.files || []).includes("flat_palette.ai") || !ENV.illustrator);
+    (j.files || []).includes("flat_palette.ai") ||
+    (ENV.illustrator === false || !ENV.illustrator_os));
   $("#result").scrollIntoView({ behavior: "smooth", block: "nearest" });
 });
 
@@ -224,7 +225,8 @@ function showResult(j) {
   $("#downloads").innerHTML = j.files.map(f =>
     `<a href="/jobs/${jobId}/${f}" download>${f}</a>`).join("");
   $("#aiBtn").classList.toggle("hidden",
-    j.files.includes("flat_palette.ai") || !ENV.illustrator);
+    j.files.includes("flat_palette.ai") ||
+    (ENV.illustrator === false || !ENV.illustrator_os));
   $("#result").scrollIntoView({ behavior: "smooth", block: "nearest" });
 }
 
@@ -382,7 +384,9 @@ document.addEventListener("click", e => {
   initViewTools();
   $("#envBadge").textContent =
     (ENV.pymol_python ? "PyMOL ✓" : "PyMOL ✗") +
-    (ENV.illustrator ? " · Illustrator ✓" : " · 无 .ai 导出");
+    (ENV.illustrator === true ? " · Illustrator ✓"
+      : ENV.illustrator === false ? " · 无 .ai 导出"
+      : (ENV.illustrator_os ? " · Illustrator 用时检测" : ""));
   loadResources();
   showPlaceholder();
   loadHistory();
