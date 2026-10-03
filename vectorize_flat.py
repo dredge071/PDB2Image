@@ -629,14 +629,17 @@ def main():
             if have_cart:
                 raw = ink_raw_of(os.path.join(rd, f"soloink{ch}.png"),
                                  cart_target)
+                # generous window: a solo render has no other chains' ink
+                # to exclude, and the mode-1 outline straddles the mask
+                # edge - a tight keep would shave off its outer half
                 keep = cv2.dilate(solo_masks[ch].astype(np.uint8), k3,
-                                  iterations=4).astype(bool)
+                                  iterations=16).astype(bool)
                 solo_cart_ink[ch] = ink_paths_keep(raw, keep)
             if have_surf:
                 raw = ink_raw_of(os.path.join(rd, f"solosurfink{ch}.png"),
                                  3.0)
                 keep = cv2.dilate(solo_smasks[ch].astype(np.uint8), k3,
-                                  iterations=4).astype(bool)
+                                  iterations=16).astype(bool)
                 solo_surf_ink[ch] = ink_paths_keep(raw, keep)
             print(f"[vec] solo ink {ch}: cart={len(solo_cart_ink.get(ch, []))}"
                   f" surf={len(solo_surf_ink.get(ch, []))} paths", flush=True)
@@ -663,16 +666,19 @@ def main():
 
             lines = [f'<g id="Chain_{ch}">']
 
-            # ---------- complete chain (solo), clipped to occluded ----------
+            # ---------- complete chain (solo) ----------
+            # no clip-path wrapper: Illustrator's SVG import may DROP
+            # clipPaths with many/small contours (the "clipping will be
+            # lost" import warning), and it is not needed - the group is
+            # hidden anyway (display=none), which alone keeps the
+            # assembled render byte-identical to visible mode. The user
+            # enables Chain_X_full in the layers panel to reveal the
+            # complete chain in place.
             if full:
-                lines.append(f'<g clip-path="url(#vis{ch})">')
                 # display=none: hidden by default. The both-mode surface
                 # shell is translucent (fill-opacity 0.4) - a visible full
                 # shell would tint through the occluding chains' own
-                # translucent shells and shift the assembled colors. Hidden,
-                # the assembled render is byte-identical to visible mode
-                # (verified in Illustrator); the user enables Chain_X_full
-                # in the layers panel to complete the chain in place.
+                # translucent shells and shift the assembled colors.
                 lines.append(f'<g id="Chain_{ch}_full" display="none">')
                 if have_cart:
                     salw = solo_allow[ch]
@@ -718,7 +724,6 @@ def main():
                     print(f"[vec] {variant} full surf {ch}: "
                           f"{len(fills)} paths", flush=True)
                 lines.append("</g>")        # Chain_ch_full
-                lines.append("</g>")        # clip wrapper
 
             # ---------- visible content (original logic) ----------
             vis = [f'<g id="Chain_{ch}_visible">'] if full else []
@@ -781,42 +786,7 @@ def main():
     clip_defs = ['<defs><clipPath id="silhouette">']
     for d in clip_d:
         clip_defs.append(f'<path d="{d}"/>')
-    if full:
-        # per-chain clip = the chain's OCCLUDED region (solo extent minus
-        # its visible region, +1px to tuck under the visible content's
-        # edge). Why not the visible region (as first planned): the both-
-        # mode surface shell is translucent (fill-opacity 0.4); a full
-        # shell inside the visible region would paint the same pixels
-        # twice (0.4 over 0.4) and visibly darken every shell. Confined
-        # to the occluded pockets instead, the full content hides beneath
-        # the occluding chains' opaque cartoons, so the assembled look is
-        # untouched; releasing the clip exposes exactly the missing parts
-        # (the +1px overlap keeps the released figure seam-free).
-        # (visible mode keeps the exact legacy defs string for
-        # byte-identical output)
-        clip_defs.append('</clipPath>')
-        k3 = np.ones((3, 3), np.uint8)
-        for ch in chains:
-            vu = masks[ch].copy()
-            if have_surf:
-                vu |= smasks[ch]
-            su = solo_masks[ch].copy()
-            if have_surf:
-                su |= solo_smasks[ch]
-            occ = su & ~vu
-            occ = cv2.dilate(occ.astype(np.uint8), k3,
-                             iterations=1).astype(bool)
-            big_v = cv2.resize(vu.astype(np.float32), (w4, h4),
-                               interpolation=cv2.INTER_LINEAR) > 0.5
-            cd = trace_mask(big_v.astype(np.uint8) * 255, MIN_AREA * up * up,
-                            1.0 / up, EPS * up, CORNER_DEG)
-            clip_defs.append(f'<clipPath id="vis{ch}">')
-            clip_defs += [f'<path d="{d}"/>' for d in cd]
-            clip_defs.append('</clipPath>')
-            print(f"[vec] clip vis{ch}: {len(cd)} contours", flush=True)
-        clip_defs.append('</defs>')
-    else:
-        clip_defs.append('</clipPath></defs>')
+    clip_defs.append('</clipPath></defs>')
     clip_attr = ' clip-path="url(#silhouette)"'
 
     for suffix, groups in (("_palette", build("palette")),
