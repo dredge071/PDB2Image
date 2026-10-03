@@ -53,3 +53,7 @@ for (var j = 0; j < JOBS.length; j++) {
 
 var f = new File("{{REPORT}}");
 f.encoding = "UTF-8"; f.open("w"); f.write(report); f.close();
+
+// close the whole application, not just the documents: unattended
+// Illustrator processes otherwise linger and block later COM runs
+app.quit();
