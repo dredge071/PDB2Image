@@ -207,3 +207,40 @@ input[type=text]:focus { outline: 2px solid #cdddfd; border-color: var(--accent)
 }
 #downloads a:hover { border-color: var(--accent); }
 .hidden { display: none; }
+
+/* ---------- view-angle preview modal ---------- */
+.modal {
+  position: fixed; inset: 0; background: rgba(30, 34, 44, .45);
+  display: flex; align-items: center; justify-content: center; z-index: 50;
+}
+.modal.hidden { display: none; }
+.modal-card {
+  background: #fff; border: 1.5px solid var(--line); border-radius: 12px;
+  width: min(520px, 92vw); max-height: 92vh; overflow: auto; padding: 16px 18px;
+}
+.modal-head {
+  display: flex; justify-content: space-between; align-items: center;
+  margin-bottom: 10px;
+}
+.iconbtn {
+  border: 1px solid var(--line); background: #fff; border-radius: 8px;
+  width: 28px; height: 28px; cursor: pointer; line-height: 1;
+}
+.iconbtn:hover { background: #f3f4f6; }
+.viewimg {
+  border: 1.5px dashed var(--line); border-radius: 10px; min-height: 230px;
+  display: flex; align-items: center; justify-content: center;
+  margin-bottom: 12px; background: #fafafa;
+}
+.viewimg img { width: 100%; display: block; border-radius: 9px; }
+.axisrow {
+  display: grid; grid-template-columns: 60px 1fr 48px; gap: 10px;
+  align-items: center; margin: 6px 0;
+}
+.axisrow output { font-variant-numeric: tabular-nums; text-align: right; }
+.modal-foot { display: flex; gap: 10px; margin-top: 12px; }
+.btn-mini {
+  border: 1px solid var(--line); background: #fff; border-radius: 8px;
+  padding: 4px 10px; cursor: pointer; font-size: 13px; margin-left: 8px;
+}
+.btn-mini:hover { background: #f3f4f6; }

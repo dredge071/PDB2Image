@@ -236,6 +236,64 @@ function renderPreview() {
     : `<img src="/jobs/${jobId}/${currentFile}?t=${Date.now()}">`;
 }
 
+// ---------- view-angle visual preview ----------
+function parseAngles(s) {
+  const v = (s || "").split(",").map(t => parseFloat(t));
+  return v.length === 3 && v.every(n => Number.isFinite(n)) ? v : [0, 0, 0];
+}
+
+function openViewModal() {
+  if (!$("#pdbFile").files[0]) {
+    $("#formHint").textContent = "请先上传 PDB 文件，再预览视角";
+    return;
+  }
+  const [x, y, z] = parseAngles($("#f_view_angles").value);
+  $("#va_x").value = x; $("#va_y").value = y; $("#va_z").value = z;
+  syncAngleLabels();
+  $("#viewHint").textContent = "";
+  $("#viewModal").classList.remove("hidden");
+}
+
+function syncAngleLabels() {
+  for (const a of ["x", "y", "z"])
+    $("#va_" + a + "_v").textContent = $("#va_" + a).value + "°";
+}
+
+function angleString() {
+  return ["x", "y", "z"].map(a => $("#va_" + a).value).join(",");
+}
+
+async function renderViewPreview() {
+  const f = $("#pdbFile").files[0];
+  if (!f) { $("#viewHint").textContent = "请先上传 PDB 文件"; return; }
+  const btn = $("#viewRender");
+  btn.disabled = true;
+  $("#viewHint").textContent = "渲染中…（约 5-10 秒）";
+  const fd = new FormData();
+  fd.append("pdb", f);
+  const chains = $("#chains").value.trim();
+  if (chains) fd.append("chains", chains);
+  for (const [ch, c] of Object.entries(chainColors)) fd.append("color_" + ch, c);
+  fd.append("mono", $("#mono").checked ? "1" : "0");
+  fd.append("rep", rep());
+  fd.append("view", $("#f_view") ? $("#f_view").value : "auto");
+  fd.append("view_angles", angleString());
+  try {
+    const r = await fetch("/api/preview_view", { method: "POST", body: fd });
+    if (!r.ok) {
+      const j = await r.json().catch(() => ({}));
+      $("#viewHint").textContent = j.error || "预览渲染失败";
+    } else {
+      const url = URL.createObjectURL(await r.blob());
+      $("#viewImg").innerHTML = `<img src="${url}" alt="视角预览">`;
+      $("#viewHint").textContent = "";
+    }
+  } catch (e) {
+    $("#viewHint").textContent = "预览请求失败";
+  }
+  btn.disabled = false;
+}
+
 // ---------- wire up ----------
 $("#pdbFile").addEventListener("change", e => e.target.files[0] && handlePDB(e.target.files[0]));
 const dz = $("#dropZone");
@@ -252,6 +310,35 @@ dz.addEventListener("drop", e => {
 document.addEventListener("change", e => {
   if (e.target.id === "f_rep") syncModeVisibility();
 });
+
+// view-angle preview: button next to the view-angles field + modal wiring
+function initViewTools() {
+  const fld = $("#f_view_angles")?.closest(".fld");
+  if (fld) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "btn-mini";
+    b.textContent = "可视化调视角";
+    b.addEventListener("click", openViewModal);
+    fld.querySelector(".ctl").appendChild(b);
+  }
+  for (const a of ["x", "y", "z"])
+    $("#va_" + a).addEventListener("input", syncAngleLabels);
+  $("#viewRender").addEventListener("click", renderViewPreview);
+  $("#viewClose").addEventListener("click", () =>
+    $("#viewModal").classList.add("hidden"));
+  $("#viewModal").addEventListener("click", e => {
+    if (e.target === $("#viewModal")) $("#viewModal").classList.add("hidden");
+  });
+  $("#viewApply").addEventListener("click", () => {
+    const el = $("#f_view_angles");
+    if (!el) return;
+    const s = angleString();
+    el.value = s === "0,0,0" ? "" : s;
+    el.dispatchEvent(new Event("change"));
+    $("#viewModal").classList.add("hidden");
+  });
+}
 
 $("#runBtn").addEventListener("click", async () => {
   const fd = collect();
@@ -292,6 +379,7 @@ document.addEventListener("click", e => {
   const d = await (await fetch("/api/params")).json();
   SPEC = d.spec; ENV = d.env;
   buildForm();
+  initViewTools();
   $("#envBadge").textContent =
     (ENV.pymol_python ? "PyMOL ✓" : "PyMOL ✗") +
     (ENV.illustrator ? " · Illustrator ✓" : " · 无 .ai 导出");

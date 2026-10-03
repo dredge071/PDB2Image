@@ -19,7 +19,7 @@ import threading
 import time
 import uuid
 
-from flask import Flask, abort, jsonify, request, send_from_directory
+from flask import Flask, abort, jsonify, request, send_file, send_from_directory
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)                      # flat_trace/
@@ -53,6 +53,7 @@ app = Flask(__name__, static_folder="static", static_url_path="")
 app.config["MAX_CONTENT_LENGTH"] = 64 * 1024 * 1024
 
 _lock = threading.Lock()          # one pipeline run at a time
+_preview_lock = threading.Lock()  # one small view-preview render at a time
 _jobs = {}                        # id -> job dict (also mirrored to job.json)
 _procs = set()                    # live subprocesses (killed on shutdown)
 
@@ -357,6 +358,62 @@ def api_resources():
                    avail_gb=round(avail_gb, 1) if avail_gb is not None
                    else None,
                    recommended=rec, per_worker_gb=PER_WORKER_GB)
+
+
+@app.post("/api/preview_view")
+def api_preview_view():
+    """Render a small flat preview with the given view angles, so the user
+    can see an orientation before submitting a job. Uses the real renderer
+    (only the `prev` channel, 480px, single worker) - what you see is
+    exactly what a job would produce, for every view mode and chain
+    count. Serialized: one PyMOL preview at a time."""
+    pdb = request.files.get("pdb")
+    if pdb is None or not pdb.filename:
+        return jsonify(error="缺少 PDB 文件"), 400
+    form = request.form
+    with _preview_lock:
+        tmp = os.path.join(JOBS_DIR, "_viewpreview")
+        shutil.rmtree(tmp, ignore_errors=True)
+        os.makedirs(tmp, exist_ok=True)
+        pdb_path = os.path.join(tmp, "input.pdb")
+        pdb.save(pdb_path)
+        chains = detect_chains(pdb_path)
+        req = (form.get("chains") or "").strip()
+        if req:
+            keep = [c.strip() for c in req.split(",") if c.strip()]
+            chains = [c for c in chains if c in keep] or chains
+        from params_spec import CHAIN_PALETTE
+        colors = []
+        for i, ch in enumerate(chains):
+            c = (form.get(f"color_{ch}") or "").strip()
+            colors.append(c if re.fullmatch(r"#[0-9A-Fa-f]{6}", c)
+                          else CHAIN_PALETTE[i % len(CHAIN_PALETTE)])
+        rep = form.get("rep") or "cartoon"
+        args = [PYMOL_PY, RENDER_PY, "--pdb", pdb_path, "--out-dir", tmp,
+                "--rep", rep, "--view", form.get("view") or "auto",
+                "--width", "480", "--height", "427",
+                "--chains", ",".join(chains), "--workers", "1",
+                "--specs", "prev", "--colors",
+                ";".join(f"{ch}:{','.join(f'{v:g}' for v in hex_to_rgb01(c))}"
+                         for ch, c in zip(chains, colors))]
+        if form.get("mono") == "1":
+            args += ["--mono", "1"]
+        va = (form.get("view_angles") or "").strip()
+        if va:
+            args += ["--view-angles", va]
+        try:
+            r = subprocess.run([str(a) for a in args], capture_output=True,
+                               text=True, encoding="utf-8", errors="replace",
+                               cwd=ROOT, timeout=300)
+        except subprocess.TimeoutExpired:
+            return jsonify(error="预览渲染超时"), 500
+        prev = os.path.join(tmp, "prev.png")
+        if r.returncode or not os.path.isfile(prev):
+            tail = ((r.stdout or "") + (r.stderr or "")).strip()[-300:]
+            return jsonify(error="预览渲染失败" + (f"：{tail}" if tail else "")), 500
+        resp = send_file(prev, mimetype="image/png", max_age=0)
+        resp.headers["Cache-Control"] = "no-store"
+        return resp
 
 
 QUEUE_TIMEOUT_S = 10      # queued job with no page heartbeat -> cancel

@@ -79,6 +79,33 @@
   </section>
 </main>
 
+<!-- ============ 视角预览弹窗 ============ -->
+<div id="viewModal" class="modal hidden">
+  <div class="modal-card">
+    <div class="modal-head"><b>视角预览</b>
+      <button id="viewClose" class="iconbtn" title="关闭">✕</button></div>
+    <div class="modal-body">
+      <div id="viewImg" class="viewimg">
+        <div class="ph">点「渲染预览」看当前角度的效果<br>（真实渲染，约 5-10 秒）</div>
+      </div>
+      <div class="axisrow"><span>绕 x 轴</span>
+        <input type="range" id="va_x" min="-180" max="180" step="1" value="0">
+        <output id="va_x_v">0°</output></div>
+      <div class="axisrow"><span>绕 y 轴</span>
+        <input type="range" id="va_y" min="-180" max="180" step="1" value="0">
+        <output id="va_y_v">0°</output></div>
+      <div class="axisrow"><span>绕 z 轴</span>
+        <input type="range" id="va_z" min="-180" max="180" step="1" value="0">
+        <output id="va_z_v">0°</output></div>
+      <div id="viewHint" class="reshint"></div>
+    </div>
+    <div class="modal-foot">
+      <button id="viewRender" class="btn-primary">渲染预览</button>
+      <button id="viewApply" class="btn-primary">应用此视角</button>
+    </div>
+  </div>
+</div>
+
 <script src="app.js"></script>
 </body>
 </html>
