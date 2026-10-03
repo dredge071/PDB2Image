@@ -32,7 +32,6 @@
 | `templates/ai_export_template.jsx` | Illustrator 导出用的 JSX 模板 |
 | `webapp/` | **网站工具（推荐入口）**：上传 PDB → 表单 → 进度/预览/下载，见 `webapp/README.md` |
 | `webapp/params.md` | 全部可调参数 + 内置固定参数的说明表（由 `webapp/params_spec.py` 生成） |
-| `docs/full_layering_spec.md` | 完整分层功能的设计规格与实测结论 |
 
 ## 安装
 
@@ -192,8 +191,7 @@ python protein2vector_flat.py --out-dir out ^
 3. 组装态（什么都不动）与 visible 模式**逐字节一致**，发布前不需要做任何处理。
 
 限制与细节：完整分层只在**渲染宽度 2400** 出成品时可用（其他宽度自动回退
-visible 并在日志说明），渲染时间比较长；设计取舍的完整记录见
-`docs/full_layering_spec.md`。
+visible 并在日志说明），渲染时间比较长。
 
 ## 依赖小结
 
