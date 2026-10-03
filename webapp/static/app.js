@@ -149,16 +149,33 @@ function collect() {
 }
 
 // ---------- job history (reopen past results in any browser) ----------
+let jobList = [];
 async function loadHistory() {
   try {
     const d = await (await fetch("/api/jobs")).json();
+    jobList = d.jobs;
     const sel = $("#jobHistory");
     sel.innerHTML = '<option value="">— 选择以前的任务 —</option>' +
       d.jobs.map(j => {
-        const tag = j.files.includes("flat_palette.ai") ? " · 含.ai" : "";
+        let tag = j.files.includes("flat_palette.ai") ? " · 含.ai" : "";
+        if (j.status === "running" || j.status === "queued")
+          tag += " · 运行中";
         return `<option value="${j.id}">${j.id}${tag}</option>`;
       }).join("");
   } catch (e) { /* server list unavailable */ }
+}
+
+// refresh recovery: if a job is still queued/running on the server, resume
+// polling it as if this page had started it
+async function resumeActiveJob() {
+  const live = jobList.find(j => j.status === "running" || j.status === "queued");
+  if (!live) return;
+  jobId = live.id;
+  $("#runBtn").disabled = true;
+  $("#term").classList.remove("hidden");
+  setStage("render", "running");
+  stopPoll(); poller = setInterval(poll, 1200);
+  poll();
 }
 
 $("#jobHistory").addEventListener("change", async e => {
@@ -228,7 +245,7 @@ async function poll() {
   }
   showLog(lines);
   if (j.status === "done") {
-    stopPoll(); showResult(j);
+    stopPoll(); showResult(j); loadHistory();
   } else if (j.status === "canceled") {
     stopPoll();
     setStage("render", "queued");
@@ -529,5 +546,6 @@ document.addEventListener("click", e => {
       : (ENV.illustrator_os ? " · Illustrator 用时检测" : ""));
   loadResources();
   showPlaceholder();
-  loadHistory();
+  await loadHistory();
+  resumeActiveJob();
 })();

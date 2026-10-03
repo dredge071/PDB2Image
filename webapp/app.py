@@ -90,6 +90,20 @@ def log(job, line):
     job["log"].append(f"[{time.strftime('%H:%M:%S')}] {line}")
     if len(job["log"]) > 800:
         del job["log"][: len(job["log"]) - 800]
+    save_job_meta(job)
+
+
+def save_job_meta(job):
+    """Mirror job state to job.json so a page refresh (or server restart)
+    can still find running jobs; failure here must never kill the job."""
+    try:
+        jf = os.path.join(job["dir"], "job.json")
+        with open(jf, "w", encoding="utf-8") as fh:
+            json.dump({k: job[k] for k in
+                       ("id", "status", "stage", "chains", "files", "log")},
+                      fh, ensure_ascii=False, indent=1)
+    except (OSError, ValueError, KeyError):
+        pass
 
 
 def stream(job, stage, args):
@@ -246,11 +260,7 @@ def run_job(job_id, form, pdb_path):
         if job["status"] == "canceled":
             shutil.rmtree(jd, ignore_errors=True)   # no artifacts to keep
         else:
-            import json
-        with open(os.path.join(jd, "job.json"), "w", encoding="utf-8") as fh:
-            json.dump({k: job[k] for k in
-                       ("id", "status", "stage", "chains", "files", "log")},
-                      fh, ensure_ascii=False, indent=1)
+            save_job_meta(job)
 
 
 # ============================ routes ============================
@@ -484,6 +494,7 @@ def api_create_job():
     job["last_seen"] = time.time()
     log(job, "任务已创建，排队等待中")
     _jobs[job_id] = job
+    save_job_meta(job)
     threading.Thread(target=run_job, args=(job_id, request.form, pdb_path),
                      daemon=True).start()
     return jsonify(id=job_id)
@@ -491,19 +502,26 @@ def api_create_job():
 
 @app.get("/api/jobs")
 def api_job_list():
-    """Past jobs (from completed job.json files), newest first."""
+    """All jobs: in-memory (queued/running/just-finished) first, then any
+    job.json on disk, newest first, deduped."""
     out = []
+    seen = set()
+    for jid, j in _jobs.items():
+        seen.add(jid)
+        out.append({"id": jid, "status": j["status"], "files": j["files"]})
+    out.sort(key=lambda e: e["id"], reverse=True)          # id starts with date+time
     if os.path.isdir(JOBS_DIR):
         for d in sorted(os.listdir(JOBS_DIR), reverse=True):
             jf = os.path.join(JOBS_DIR, d, "job.json")
-            if os.path.isfile(jf):
-                try:
-                    meta = json.load(open(jf, encoding="utf-8"))
-                    out.append({"id": meta.get("id", d),
-                                "status": meta.get("status"),
-                                "files": meta.get("files", [])})
-                except (OSError, ValueError):
-                    continue
+            if not os.path.isfile(jf) or d in seen:
+                continue
+            try:
+                meta = json.load(open(jf, encoding="utf-8"))
+                out.append({"id": meta.get("id", d),
+                            "status": meta.get("status"),
+                            "files": meta.get("files", [])})
+            except (OSError, ValueError):
+                continue
     return jsonify(jobs=out[:20])
 
 
