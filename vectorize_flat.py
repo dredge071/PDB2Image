@@ -29,7 +29,7 @@ from PIL import Image
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
-from vec_core import svg_document, trace_mask  # noqa: E402
+from vec_core import svg_document, trace_mask, trace_mask_g1  # noqa: E402
 
 CANON_W = 2400          # masks/depth are traced in this space
 MIN_AREA = 260          # at 2400
@@ -546,8 +546,9 @@ def main():
         for i in range(1, n):
             if stats[i, 4] < 20:
                 r[labels == i] = 0
-        return [d for d in trace_mask(r, min_area=40, scale=1.0, eps=1.2,
-                                      corner_deg=45.0)]
+        # G1-continuous reconstruction: smooth curves, sharp junctions
+        return [d for d in trace_mask_g1(r, min_area=40, scale=1.0,
+                                         eps=1.2, corner_deg=80.0)]
 
     # cartoon ink weight selectable (targets in 2400-canvas px, honored
     # at every render width); surface ink keeps the fuller band

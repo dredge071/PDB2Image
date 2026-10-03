@@ -154,3 +154,51 @@ def svg_document(size, bg, groups):
             f'viewBox="0 0 {w} {h}"><g id="Background_Black">'
             f'<rect x="0" y="0" width="{w}" height="{h}" fill="{bg}"/></g>')
     return "\n".join([head] + groups + ["</svg>"])
+
+
+def path_d_g1(contours_pts, corner_deg=80.0):
+    """Tangent-continuous cubic Bezier reconstruction of closed contours.
+
+    Vertices with turn angle >= corner_deg break the tangent (sharp
+    corner - junctions/hairpins stay crisp); everything between is
+    smoothed with Catmull-Rom tangents, so zoomed-in ink reads as curves
+    instead of piecewise straights."""
+    parts = []
+    for pts in contours_pts:
+        n = len(pts)
+        if n < 3:
+            continue
+        corners = set(find_corners(pts, corner_deg))
+        T = np.zeros_like(pts)
+        for i in range(n):
+            if i in corners:
+                continue
+            T[i] = (pts[(i + 1) % n] - pts[(i - 1) % n]) / 2.0
+            nxt = pts[(i + 1) % n] - pts[i]
+            ln = np.linalg.norm(nxt)
+            if ln > 1e-6 and np.linalg.norm(T[i]) > 1.5 * ln:
+                T[i] *= 1.5 * ln / np.linalg.norm(T[i])   # limit overshoot
+        parts.append(f"M{pts[0][0]:.1f} {pts[0][1]:.1f}")
+        for i in range(n):
+            j = (i + 1) % n
+            if np.allclose(T[i], 0) and np.allclose(T[j], 0):
+                parts.append(f"L{pts[j][0]:.1f} {pts[j][1]:.1f}")
+            else:
+                c1 = pts[i] + T[i] / 3.0
+                c2 = pts[j] - T[j] / 3.0
+                parts.append(f"C{c1[0]:.1f} {c1[1]:.1f} "
+                             f"{c2[0]:.1f} {c2[1]:.1f} "
+                             f"{pts[j][0]:.1f} {pts[j][1]:.1f}")
+        parts.append("Z")
+    return "".join(parts)
+
+
+def trace_mask_g1(mask, min_area=MIN_AREA, scale=0.5, eps=EPS,
+                  corner_deg=80.0):
+    """trace_mask variant that reconstructs with G1-continuous curves."""
+    shapes = []
+    m = mask.astype(np.uint8) * 255
+    for outer, holes in trace_contours(m, min_area, eps):
+        shapes.append(path_d_g1([outer * scale] + [h * scale for h in holes],
+                                corner_deg=corner_deg))
+    return shapes
