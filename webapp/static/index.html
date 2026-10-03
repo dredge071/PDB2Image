@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>flat_trace · 蛋白质平涂矢量管线</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header class="hero">
+  <div class="hero-inner">
+    <div>
+      <h1>flat_trace</h1>
+      <p>PyMOL 平涂渲染 → 逐链分层矢量 → Illustrator 工程文件</p>
+    </div>
+    <nav>
+      <a href="/params.md" target="_blank">参数说明表</a>
+      <span id="envBadge" class="badge">检测环境中…</span>
+    </nav>
+  </div>
+</header>
+
+<main>
+  <!-- ============ 左列：参数 ============ -->
+  <section class="card" id="formPane">
+    <h2><span class="step">1</span>上传结构</h2>
+    <div id="dropZone">
+      <div class="dz-icon">⬇</div>
+      <b>拖入 .pdb 文件</b><span>或点击选择</span>
+      <input type="file" id="pdbFile" accept=".pdb,.ent" hidden>
+    </div>
+
+    <div id="chainBox" class="subcard hidden">
+      <label class="row"><span>链（逗号分隔）</span>
+        <input id="chains" type="text" placeholder="A,B,C"></label>
+      <div id="colorRow"></div>
+      <label class="chk"><input type="checkbox" id="mono"> 单色模式（全链同色）</label>
+    </div>
+
+    <h2><span class="step">2</span>参数</h2>
+    <div id="specForm" class="subcard"></div>
+    <div id="resHint" class="reshint"></div>
+    <button id="runBtn" class="btn-primary">开始转换</button>
+    <div id="formHint" class="err"></div>
+  </section>
+
+  <!-- ============ 右列：运行与结果 ============ -->
+  <section id="runPane">
+    <div class="card" id="runCard">
+      <h2><span class="step">3</span>运行</h2>
+      <label class="row hist-row"><span>历史任务</span>
+        <select id="jobHistory"><option value="">— 选择以前的任务 —</option></select></label>
+      <div id="stageBar" class="hidden">
+        <span data-stage="render">① 渲染</span><i></i>
+        <span data-stage="vectorize">② 矢量化</span><i></i>
+        <span data-stage="export">③ .ai</span>
+      </div>
+      <div id="term" class="term hidden">
+        <div class="term-bar">
+          <span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>
+          <span class="term-title">flat_trace — job.log</span>
+        </div>
+        <pre id="log"></pre>
+      </div>
+    </div>
+
+    <div class="card" id="result">
+      <h2><span class="step">4</span>结果</h2>
+      <div id="previewTabs">
+        <button data-tab="flat_palette.svg" class="tabbtn active">彩色版 SVG</button>
+        <button data-tab="flat_mono.svg" class="tabbtn">单色版 SVG</button>
+        <button data-tab="prev.png" class="tabbtn">渲染预览</button>
+      </div>
+      <div id="previewBox"></div>
+      <div id="downloads"></div>
+      <button id="aiBtn" class="btn-primary hidden">导出分层 .ai（Illustrator）</button>
+    </div>
+  </section>
+</main>
+
+<script src="app.js"></script>
+</body>
+</html>

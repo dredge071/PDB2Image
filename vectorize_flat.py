@@ -1,0 +1,717 @@
+"""flat_trace branch vectorizer — v7 architecture (restored) + fixes.
+
+BASE (the version the user approved as the direction):
+  ink   PyMOL mode-1 line art (1x render, black objects) -> skeleton ->
+        graph walk -> direction-continuous merge -> SVG strokes with
+        uniform width and miter joins. Follows the full mode-1 drawing:
+        helix ribbon edges, loop outlines, arrow shapes.
+  fills chain masks -> flat colour, split into depth tones by cumulative
+        masks; grown 2px under the ink strokes (clipped to the ink
+        neighbourhood so nothing pokes out the other side).
+
+FIXES relative to v7:
+  - open-polyline smoothing (smooth_open): the closed variant wrapped the
+    two ends of a stroke together and manufactured straight chords across
+    the canvas - the main "wrong connections".
+  - no loose endpoint bridging (the other chord source).
+  - stroke width 1.0.
+
+Run:  C:/Python314/python.exe vectorize_flat.py --renders-dir out
+      --chains A,B,C --out-prefix out/flat --compare out/compare.png
+"""
+import argparse
+import os
+from collections import defaultdict
+
+import numpy as np
+import cv2
+from PIL import Image
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+
+from vec_core import svg_document, trace_mask  # noqa: E402
+
+CANON_W = 2400          # masks/depth are traced in this space
+MIN_AREA = 260          # at 2400
+EPS = 1.3
+CORNER_DEG = 35.0
+
+DEFAULT_PALETTE = ["#F2F0B0", "#C7C7F0", "#F7C2C7", "#BFEABF", "#FACF9F",
+                   "#C9B4F7", "#F2A19C", "#A7DBDB", "#FAD600", "#9CA8E0",
+                   "#E0A2DD", "#BDEB67", "#C1E8F5", "#E05A75", "#A6F0D2",
+                   "#E8E8C7", "#E3B4F7", "#FFA875", "#B2F2D6", "#A4B8E5"]
+
+
+def hex_to_rgb(s):
+    s = s.lstrip("#")
+    return tuple(int(s[i:i + 2], 16) for i in (0, 2, 4))
+
+
+def scale_hex(h, f):
+    return tuple(max(0, min(255, int(c * f))) for c in hex_to_rgb(h))
+
+
+def load_canon(png, w=CANON_W, resample=Image.LANCZOS):
+    im = Image.open(png)
+    if im.width != w:
+        im = im.resize((w, round(im.height * w / im.width)), resample)
+    return im
+
+
+OFFS8 = [(-1, 0), (-1, 1), (0, 1), (1, 1), (1, 0), (1, -1), (0, -1), (-1, -1)]
+
+
+def thinning(img_bool):
+    """Zhang-Suen thinning, vectorized. Returns a 1px-wide bool skeleton."""
+    I = np.pad(img_bool.astype(np.uint8), 1)
+
+    def sh(dy, dx):
+        return np.roll(np.roll(I, dy, 0), dx, 1)
+
+    changed = True
+    while changed:
+        changed = False
+        for step in (0, 1):
+            P2, P3, P4 = sh(-1, 0), sh(-1, 1), sh(0, 1)
+            P5, P6, P7 = sh(1, 1), sh(1, 0), sh(1, -1)
+            P8, P9 = sh(0, -1), sh(-1, -1)
+            B = P2 + P3 + P4 + P5 + P6 + P7 + P8 + P9
+            seq = (P2, P3, P4, P5, P6, P7, P8, P9, P2)
+            A = np.zeros_like(I)
+            for i in range(8):
+                A += ((seq[i] == 0) & (seq[i + 1] == 1)).astype(np.uint8)
+            m = (I == 1) & (B >= 2) & (B <= 6) & (A == 1)
+            if step == 0:
+                c = m & (P2 * P4 * P6 == 0) & (P4 * P6 * P8 == 0)
+            else:
+                c = m & (P2 * P4 * P8 == 0) & (P2 * P6 * P8 == 0)
+            if c.any():
+                I[c] = 0
+                changed = True
+    return I[1:-1, 1:-1].astype(bool)
+
+
+def smooth_open(pts, win=5, rounds=1):
+    """Moving-average smoothing for OPEN polylines: pads by replicating the
+    first/last point. (tracer_cv.smooth_polyline is the CLOSED variant - its
+    wrap-around pulls the two ends of an open stroke toward each other and
+    manufactures straight chords across the canvas.)"""
+    for _ in range(rounds):
+        k = win // 2
+        ext = np.vstack([np.repeat(pts[:1], k, 0), pts,
+                         np.repeat(pts[-1:], k, 0)])
+        ker = np.ones(win) / win
+        sm = np.empty_like(pts)
+        for d in (0, 1):
+            sm[:, d] = np.convolve(ext[:, d], ker, mode="same")[k:k + len(pts)]
+        pts = sm
+    return pts
+
+
+def prune_spurs(S, rounds=2):
+    """Drop endpoint pixels a few times: kills tiny spurs that would
+    otherwise become false graph nodes."""
+    S = S.copy()
+    H, W = S.shape
+    for _ in range(rounds):
+        nb = np.zeros((H, W), np.uint8)
+        for dy, dx in OFFS8:
+            nb += np.roll(np.roll(S, dy, 0), dx, 1).astype(np.uint8)
+        endp = S & (nb <= 1)
+        if not endp.any():
+            break
+        S[endp] = False
+    return S
+
+
+def bridge_endpoints(S, max_dist=18.0, min_dot=-0.4, max_perp=3.5):
+    """Strictly connect skeleton endpoints that continue each other:
+    (1) close, (2) outward directions opposing, (3) COLLINEAR - each
+    endpoint's line direction must point at the other endpoint with less
+    than max_perp px of perpendicular offset. The collinearity test is what
+    rejects the endpoints of two PARALLEL lines facing each other across a
+    gap (their connecting segment is skewed off-axis), which is what
+    produced the long wrong connections of earlier versions."""
+    S = S.copy().astype(np.uint8)
+    H, W = S.shape
+
+    def nbcount():
+        nb = np.zeros((H, W), np.uint8)
+        for dy, dx in OFFS8:
+            nb += np.roll(np.roll(S, dy, 0), dx, 1).astype(np.uint8)
+        return nb
+
+    nb = nbcount()
+    ys, xs = np.nonzero(S & (nb == 1))
+    if len(ys) < 2:
+        return S.astype(bool)
+    pts = np.stack([xs, ys], 1).astype(float)
+    d = np.linalg.norm(pts[:, None, :] - pts[None, :, :], axis=2)
+    iu = np.triu_indices(len(pts), 1)
+
+    def outward(p):
+        for dy, dx in OFFS8:
+            q = (p[0] + dy, p[1] + dx)
+            if 0 <= q[0] < H and 0 <= q[1] < W and S[q]:
+                v = np.array([p[1] - q[1], p[0] - q[0]], float)
+                return v / (np.linalg.norm(v) + 1e-9)
+        return None
+
+    dirs = [outward((int(y), int(x))) for y, x in zip(ys, xs)]
+    for k in np.nonzero((d[iu] > 1) & (d[iu] < max_dist))[0]:
+        a, b = iu[0][k], iu[1][k]
+        if dirs[a] is None or dirs[b] is None:
+            continue
+        if float(np.dot(dirs[a], dirs[b])) >= min_dot:
+            continue
+        seg = pts[b] - pts[a]
+        seg_len = np.linalg.norm(seg) + 1e-9
+        u = seg / seg_len
+        # both lines must aim at each other (small perpendicular offset)
+        perp_a = abs(float(np.cross(dirs[a], u))) * seg_len
+        perp_b = abs(float(np.cross(dirs[b], u))) * seg_len
+        aim_a = float(np.dot(dirs[a], u))
+        aim_b = float(np.dot(dirs[b], -u))
+        if (perp_a < max_perp and perp_b < max_perp
+                and aim_a > 0.6 and aim_b > 0.6):
+            cv2.line(S, (int(xs[a]), int(ys[a])), (int(xs[b]), int(ys[b])),
+                     1, 1)
+    return S.astype(bool)
+
+
+def skeleton_strokes(S, scale, eps, min_len):
+    """Skeleton pixel graph -> merged vector strokes -> one 'd' per stroke.
+
+    Edges between junction/endpoint nodes are merged THROUGH nodes by
+    direction continuity (a pen crossing an intersection without lifting),
+    then smoothed and emitted as open-path beziers."""
+    H, W = S.shape
+    nb = np.zeros((H, W), np.uint8)
+    for dy, dx in OFFS8:
+        nb += np.roll(np.roll(S, dy, 0), dx, 1).astype(np.uint8)
+    node = S & (nb != 2)
+
+    visited = np.zeros((H, W), bool)
+
+    def neighbors(p):
+        y, x = p
+        for dy, dx in OFFS8:
+            q = (y + dy, x + dx)
+            if 0 <= q[0] < H and 0 <= q[1] < W and S[q]:
+                yield q
+
+    edges = []
+    for p in zip(*np.nonzero(S)):
+        if not node[p]:
+            continue
+        for q in neighbors(p):
+            if node[q]:
+                if p < q:
+                    edges.append([p, q])
+                continue
+            if visited[q]:
+                continue
+            path, prev, cur = [p, q], p, q
+            visited[q] = True
+            while not node[cur]:
+                nxt = [r for r in neighbors(cur)
+                       if r != prev and not visited[r]]
+                if not nxt:
+                    break
+                r = nxt[0]
+                visited[r] = True
+                path.append(r)
+                prev, cur = cur, r
+            edges.append(path)
+
+    rem = S & ~visited & ~node
+    for p in zip(*np.nonzero(rem)):
+        if visited[p]:
+            continue
+        path, prev, cur = [p], None, p
+        visited[p] = True
+        while True:
+            nxt = [r for r in neighbors(cur) if r != prev and not visited[r]]
+            if not nxt:
+                break
+            r = nxt[0]
+            visited[r] = True
+            path.append(r)
+            prev, cur = cur, r
+        if len(path) > 2:
+            path.append(p)
+        edges.append(path)
+
+    # ---- merge edges through nodes by direction continuity ----
+    adj = defaultdict(list)
+    for i, pl in enumerate(edges):
+        if pl[0] != pl[-1]:          # skip closed loops
+            adj[pl[0]].append((i, 0))
+            adj[pl[-1]].append((i, -1))
+    used = [False] * len(edges)
+
+    def far_dir(pl, end, k=4):
+        """unit direction pointing INTO the edge from the given end"""
+        seg = pl[1:k + 1] if end == 0 else pl[-2:-k - 2:-1]
+        v = np.array(seg[-1], float) - np.array(seg[0], float)
+        n = np.linalg.norm(v)
+        return v / n if n > 0 else np.zeros(2)
+
+    merged = []
+    for i, pl in enumerate(edges):
+        if used[i]:
+            continue
+        used[i] = True
+        if pl[0] == pl[-1]:          # closed loop
+            merged.append(pl)
+            continue
+        chain = list(pl)
+        for tail in (False, True):
+            while True:
+                p = chain[-1] if not tail else chain[0]
+                cands = [(j, e) for (j, e) in adj[p] if not used[j]]
+                if not cands:
+                    break
+                h = far_dir(chain, 1 if not tail else 0, 6) * -1
+                best, best_score = None, -2.0
+                for j, e in cands:
+                    c = far_dir(edges[j], e, 4)
+                    score = float(np.dot(h, c))
+                    if score > best_score:
+                        best, best_score = (j, e), score
+                j, e = best
+                used[j] = True
+                if not tail:                    # append: continue forward
+                    pl2 = edges[j][::-1] if e == -1 else edges[j]
+                    chain += pl2[1:]
+                else:                           # prepend: extend backward
+                    pl2 = edges[j][::-1] if e == 0 else edges[j]
+                    chain[:0] = pl2[:-1]
+        merged.append(chain)
+
+    # ---- polylines -> smooth open-path bezier 'd' ----
+    out = []
+    for path in merged:
+        if len(path) < 2:
+            continue
+        a = np.array([(x, y) for y, x in path], float) * scale
+        length = float(np.linalg.norm(np.diff(a, axis=0), axis=1).sum())
+        if length < min_len:
+            continue
+        if len(a) > 4:
+            a = smooth_open(a, 9, 2)
+        # closed=False: these are OPEN strokes - with closed=True the
+        # decimator treats start/end as neighbours and manufactures
+        # straight chords across the canvas
+        dec = cv2.approxPolyDP(a.reshape(-1, 1, 2).astype(np.float32),
+                               eps, False)[:, 0, :]
+        if len(dec) < 2:
+            dec = a
+        n = len(dec)
+        parts = [f"M{dec[0][0]:.2f} {dec[0][1]:.2f}"]
+        for i in range(1, n - 1):
+            mid = (dec[i] + dec[i + 1]) / 2
+            parts.append(f"C{dec[i][0]:.2f} {dec[i][1]:.2f} "
+                         f"{dec[i][0]:.2f} {dec[i][1]:.2f} "
+                         f"{mid[0]:.2f} {mid[1]:.2f}")
+        parts.append(f"L{dec[-1][0]:.2f} {dec[-1][1]:.2f}")
+        out.append("".join(parts))
+    return out
+
+
+def prep4(mask, allowed=None, up=4):
+    """Resize a raster mask to 4x and optionally clip it (nearest for the
+    clip so its edge stays exact). Shared by fills and the undercoat."""
+    h, w = mask.shape
+    big = cv2.resize(mask.astype(np.float32), (w * up, h * up),
+                     interpolation=cv2.INTER_LINEAR) > 0.5
+    if allowed is not None:
+        big &= cv2.resize(allowed.astype(np.float32), (w * up, h * up),
+                          interpolation=cv2.INTER_NEAREST) > 0.5
+    return big.astype(np.uint8) * 255
+
+
+def chain_fills(mask, depth, thresholds, color_hex, shade_step, allowed=None):
+    """Base fill + cumulative deeper masks -> [(d, rgb)] back-to-front safe.
+
+    Deeper cumulative masks are painted over the base, so every boundary
+    always sits on an existing fill (no background-colored seams).
+    Tracing happens at 4x (subpixel edges), and the raster is clipped to
+    `allowed` AT 4x before tracing, so the traced boundary follows the
+    allowed region itself - overshoot from bezier smoothing is gone."""
+    up = 4
+    h, w = mask.shape
+
+    def prep(m):
+        big = cv2.resize(m.astype(np.float32), (w * up, h * up),
+                         interpolation=cv2.INTER_LINEAR) > 0.5
+        if allowed is not None:
+            big &= cv2.resize(allowed.astype(np.float32), (w * up, h * up),
+                              interpolation=cv2.INTER_NEAREST) > 0.5
+        return big.astype(np.uint8) * 255
+
+    shapes = [(d, hex_to_rgb(color_hex))
+              for d in trace_mask(prep(mask), MIN_AREA * up * up,
+                                  1.0 / up, EPS * up, CORNER_DEG)]
+    for j, t in enumerate(thresholds):
+        deep = mask & (depth <= t)
+        if deep.sum() < 40:
+            continue
+        col = scale_hex(color_hex, 1.0 - (j + 1) * shade_step)
+        shapes += [(d, col) for d in trace_mask(prep(deep),
+                                                MIN_AREA * up * up, 1.0 / up,
+                                                EPS * up, CORNER_DEG)]
+    return shapes
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--renders-dir", required=True)
+    ap.add_argument("--chains", required=True)
+    ap.add_argument("--colors", default="")     # A:#hex;B:#hex
+    ap.add_argument("--out-prefix", required=True)
+    ap.add_argument("--depth-bands", type=int, default=3)
+    ap.add_argument("--shade-step", type=float, default=0.10)
+    ap.add_argument("--mono-color", default="#7FA8D9")
+    ap.add_argument("--mono-step", type=float, default=0.24)
+    ap.add_argument("--ink-color", default="45,42,40")
+    ap.add_argument("--ink-width", type=float, default=1.0,
+                    help="stroke width in output units (2400-space)")
+    ap.add_argument("--rep", choices=["cartoon", "surface", "both"],
+                    default="cartoon")
+    ap.add_argument("--surf-wash", type=float, default=0.25,
+                    help="both mode: whiten the surface tone (pale shell)")
+    ap.add_argument("--ink-dilate", type=int, default=0, choices=[0, 1],
+                    help="cartoon ink band: 0=thin ~1.5px, 1=regular ~3px")
+    ap.add_argument("--width", type=int, default=2400)
+    ap.add_argument("--bg", default="#FFFFFF")
+    ap.add_argument("--compare", default="")
+    ap.add_argument("--audit", default="",
+                    help="write audit overlay PNGs (red=overshoot, "
+                         "yellow=shortfall) with this prefix")
+    args = ap.parse_args()
+
+    chains = [c.strip() for c in args.chains.split(",") if c.strip()]
+    colors = {}
+    if args.colors:
+        for part in args.colors.split(";"):
+            if part:
+                ch, hx = part.split(":")
+                colors[ch] = hx
+    for i, ch in enumerate(chains):
+        colors.setdefault(ch, DEFAULT_PALETTE[i % len(DEFAULT_PALETTE)])
+
+    rd = args.renders_dir
+    out_w = args.width
+
+    # ===================== representation assembly =====================
+    # cartoon mode : cartoon fills + ink per chain                (opaque)
+    # surface mode : surface fills (light/shade bands) + surface ink
+    # both mode    : surface opaque on top, cartoon whitened below,
+    #                each chain's surface+cartoon in ONE layer group
+    rep = args.rep
+    have_surf = rep in ("surface", "both")
+    have_cart = rep in ("cartoon", "both")
+
+    # ---- canonical-space cartoon masks + shared depth ----
+    masks, depth_img = {}, None
+    for ch in chains:
+        # binary mask: bilinear + midpoint threshold (LANCZOS rings would
+        # shift region edges when a low-res render is upscaled)
+        im = load_canon(os.path.join(rd, f"mask{ch}.png"),
+                        resample=Image.BILINEAR)
+        a = np.array(im.convert("RGB"))
+        masks[ch] = (a.min(axis=2) > 128)
+        depth_img = im
+    # the output canvas is ALWAYS the canonical trace space (2400): fill/
+    # ink paths and the audit all assume CANON_W coordinates. --width is
+    # accepted for backwards compat but no longer changes the geometry.
+    out_w = CANON_W
+    size = (out_w, round(out_w * depth_img.height / depth_img.width))
+
+    dim = np.array(load_canon(os.path.join(rd, "depth.png")).convert("L"),
+                   dtype=float)
+    union = np.zeros_like(dim, dtype=bool)
+    for ch in chains:
+        union |= masks[ch]
+
+    lo, hi = np.percentile(dim[union], (2, 98))
+    dim = np.clip((dim - lo) / max(1e-6, hi - lo) * 255.0, 0, 255)
+    k = max(0, args.depth_bands - 1)
+    thresholds = (np.quantile(dim[union], np.linspace(0, 1, k + 2)[1:-1])
+                  if k else np.array([]))
+
+    # ---- surface masks + shading luminance ----
+    smasks, slum = {}, None
+    if have_surf:
+        sprev = load_canon(os.path.join(rd, "surfmask" + chains[0] + ".png"))
+        del sprev
+        for ch in chains:
+            im = load_canon(os.path.join(rd, f"surfmask{ch}.png"),
+                            resample=Image.BILINEAR)
+            smasks[ch] = (np.array(im.convert("RGB")).min(axis=2) > 128)
+        sh = np.array(load_canon(os.path.join(rd, "surfshade.png"))
+                      .convert("L"), dtype=float)
+        sunion = np.zeros_like(sh, dtype=bool)
+        for ch in chains:
+            sunion |= smasks[ch]
+        slo, shi = np.percentile(sh[sunion], (2, 98))
+        slum = np.clip((sh - slo) / max(1e-6, shi - slo) * 255.0, 0, 255)
+        union = sunion if rep == "surface" else (union | sunion)
+
+    allowed = cv2.dilate(union.astype(np.uint8), np.ones((3, 3), np.uint8),
+                         iterations=1).astype(bool)
+
+    # ---- nearest-chain partition of the scene: every pixel is grown out
+    #      to its closest chain so per-chain ink tracing keeps only that
+    #      chain's own lines (the ink render is full-scene) ----
+    chain_lbl = np.full(dim.shape, -1, np.int32)
+    for i, ch in enumerate(chains):
+        seed = masks[ch].copy()
+        if have_surf:
+            seed |= smasks[ch]
+        chain_lbl[seed] = i
+    grow_k = np.ones((3, 3), np.uint8)
+    for _ in range(16):
+        if not (chain_lbl < 0).any():
+            break
+        for i in range(len(chains)):
+            d = cv2.dilate((chain_lbl == i).astype(np.uint8), grow_k,
+                           iterations=1).astype(bool)
+            chain_lbl[d & (chain_lbl < 0)] = i
+
+    up = 4
+
+    def prep4m(m):
+        big = cv2.resize(m.astype(np.float32),
+                         (m.shape[1] * up, m.shape[0] * up),
+                         interpolation=cv2.INTER_LINEAR) > 0.5
+        big &= cv2.resize(allowed.astype(np.float32),
+                          (m.shape[1] * up, m.shape[0] * up),
+                          interpolation=cv2.INTER_NEAREST) > 0.5
+        return big.astype(np.uint8) * 255
+
+    def band_paths(mask, min_area=MIN_AREA):
+        return trace_mask(prep4m(mask), min_area * up * up, 1.0 / up,
+                          EPS * up, CORNER_DEG)
+
+    def wash(c, f):
+        return tuple(int(v + (255 - v) * f) for v in c)
+
+    # ---- trace the mode-1 ink of whichever reps are active, per chain:
+    #      the ink PNG is a full-scene render, so each trace is restricted
+    #      to the chain's own territory instead of handing the whole
+    #      trimer's ink to every chain layer ----
+    def ink_raw_of(png, target_px):
+        """Canonicalize an ink render to CANON_W, then normalize the
+        measured stroke width to target_px (canvas units). Mode-1 outlines
+        are a fixed ~2px at ANY render width, so a 600px render upscaled
+        4x would otherwise give 4x-too-fat lines; erode/dilate by the
+        measured excess instead of a fixed per-mode dilation."""
+        im = Image.open(png).convert("RGB")
+        if im.width != CANON_W:
+            im = im.resize((CANON_W, round(im.height * CANON_W / im.width)),
+                           Image.LANCZOS)
+        a = np.array(im)
+        raw = (a.min(axis=2) > 50).astype(np.uint8) * 255
+        raw = cv2.morphologyEx(raw, cv2.MORPH_CLOSE,
+                               np.ones((3, 3), np.uint8), iterations=2)
+        sk = thinning(raw > 0)
+        n = int(sk.sum())
+        if n:
+            w = (raw > 0).sum() / n
+            k = np.ones((3, 3), np.uint8)
+            if w > target_px + 1:
+                # overweight (low-res render upscaled): rebuild from the
+                # 1px skeleton - erosion would break thin segments
+                raw = sk.astype(np.uint8) * 255
+                extra = max(1, int(round(target_px / 2.0)))
+                raw = cv2.dilate(raw, k, iterations=extra)
+                print(f"[vec] ink width: measured {w:.1f}px -> skeleton "
+                      f"rebuilt ~{1 + 2 * extra}px", flush=True)
+            elif w < target_px - 1:
+                it = int(round((target_px - w) / 2.0))
+                raw = cv2.dilate(raw, k, iterations=it)
+                print(f"[vec] ink width: measured {w:.1f}px -> dilated "
+                      f"+{it} iters", flush=True)
+            else:
+                print(f"[vec] ink width: measured {w:.1f}px, on target",
+                      flush=True)
+        return raw
+
+    def ink_paths_keep(raw, keep):
+        r = raw & (keep.astype(np.uint8) * 255)
+        n, labels, stats, _ = cv2.connectedComponentsWithStats(r,
+                                                               connectivity=8)
+        for i in range(1, n):
+            if stats[i, 4] < 20:
+                r[labels == i] = 0
+        return [d for d in trace_mask(r, min_area=40, scale=1.0, eps=1.2,
+                                      corner_deg=45.0)]
+
+    # cartoon ink weight selectable (targets in 2400-canvas px, honored
+    # at every render width); surface ink keeps the fuller band
+    cart_target = 1.5 if args.ink_dilate == 0 else 3.0
+    cart_raw = (ink_raw_of(os.path.join(rd, "ink.png"), cart_target)
+                if have_cart else None)
+    surf_raw = (ink_raw_of(os.path.join(rd, "surfink.png"), 3.0)
+                if have_surf else None)
+    cart_ink = {ch: (ink_paths_keep(cart_raw, chain_lbl == ci)
+                     if have_cart else [])
+                for ci, ch in enumerate(chains)}
+    surf_ink = {ch: (ink_paths_keep(surf_raw, chain_lbl == ci)
+                     if have_surf else [])
+                for ci, ch in enumerate(chains)}
+    for ch in chains:
+        print(f"[vec] ink {ch}: cart={len(cart_ink[ch])} "
+              f"surf={len(surf_ink[ch])} paths", flush=True)
+
+    ink_rgb = tuple(int(v) for v in args.ink_color.split(","))
+    surf_ink_rgb = tuple(int(v * 0.75 + 30) for v in ink_rgb)
+
+    # surface tone thresholds from the shading luminance
+    sthr_hi = sthr_lo = None
+    if slum is not None:
+        sthr_hi = np.percentile(slum[union], 66)
+        sthr_lo = np.percentile(slum[union], 33)
+
+    def build(variant):
+        """ONE layer per chain: <g id="Chain_ch"> containing that chain's
+        own cartoon subgroup (inner) and surface subgroup (outer wrap).
+        both mode: the surface subgroup carries fill-opacity -> the classic
+        'cartoon seen through a translucent surface' figure. Single-rep
+        modes: that rep only, fully opaque."""
+        groups = []
+        for ci, ch in enumerate(chains):
+            lines = [f'<g id="Chain_{ch}">']
+
+            # ---------- cartoon (inner) ----------
+            if have_cart:
+                col_hex = (colors[ch] if variant == "palette"
+                           else "#%02X%02X%02X" % scale_hex(
+                               args.mono_color,
+                               max(0.25, 1.0 - ci * args.mono_step)))
+                m = masks[ch].astype(np.uint8)
+                grown = cv2.dilate(m, np.ones((3, 3), np.uint8), iterations=4)
+                fm = (grown & allowed).astype(bool)
+                fills = chain_fills(fm, dim, thresholds, col_hex,
+                                    args.shade_step, allowed=allowed)
+                ci_ink = [(d, ink_rgb) for d in cart_ink[ch]]
+                lines.append(f'<g id="Chain_{ch}_cartoon">')
+                lines += [f'<path d="{d}" fill="rgb({c[0]},{c[1]},{c[2]})"/>'
+                          for d, c in fills]
+                lines += [f'<path d="{d}" fill="rgb({c[0]},{c[1]},{c[2]})"/>'
+                          for d, c in ci_ink]
+                lines.append("</g>")
+                print(f"[vec] {variant} cart {ch}: {len(fills)} paths",
+                      flush=True)
+
+            # ---------- surface (outer wrap) ----------
+            if have_surf:
+                base = (hex_to_rgb(colors[ch]) if variant == "palette"
+                        else scale_hex(args.mono_color,
+                                       max(0.25, 1.0 - ci * args.mono_step)))
+                if rep == "both":
+                    base = wash(base, args.surf_wash)   # pale + translucent
+                mid = tuple(int(v * 0.94) for v in base)
+                dark = tuple(int(v * 0.85) for v in base)
+                fills = [(d, base) for d in band_paths(smasks[ch])]
+                fills += [(d, mid) for d in
+                          band_paths(smasks[ch] & (slum < sthr_hi))]
+                fills += [(d, dark) for d in
+                          band_paths(smasks[ch] & (slum < sthr_lo))]
+                si = [(d, surf_ink_rgb) for d in surf_ink[ch]]
+                op = ' fill-opacity="0.4"' if rep == "both" else ""
+                lines.append(f'<g id="Chain_{ch}_surface"{op}>')
+                lines += [f'<path d="{d}" fill="rgb({c[0]},{c[1]},{c[2]})"/>'
+                          for d, c in fills]
+                lines += [f'<path d="{d}" fill="rgb({c[0]},{c[1]},{c[2]})"/>'
+                          for d, c in si]
+                lines.append("</g>")
+                print(f"[vec] {variant} surf {ch}: {len(fills)} paths",
+                      flush=True)
+
+            lines.append("</g>")
+            groups.append(lines)
+        return groups
+
+    # ---- silhouette clip (covers whichever reps are active) ----
+    h4, w4 = union.shape[0] * up, union.shape[1] * up
+    big_u = cv2.resize(union.astype(np.float32), (w4, h4),
+                       interpolation=cv2.INTER_LINEAR) > 0.5
+    clip_d = [d for d in trace_mask(big_u.astype(np.uint8) * 255,
+                                    MIN_AREA * up * up, 1.0 / up, EPS * up,
+                                    CORNER_DEG)]
+    clip_defs = ['<defs><clipPath id="silhouette">']
+    for d in clip_d:
+        clip_defs.append(f'<path d="{d}"/>')
+    clip_defs.append('</clipPath></defs>')
+    clip_attr = ' clip-path="url(#silhouette)"'
+
+    for suffix, groups in (("_palette", build("palette")),
+                           ("_mono", build("mono"))):
+        path = args.out_prefix + suffix + ".svg"
+        lines = clip_defs[:] + [ln for g in groups for ln in g]
+        open(path, "w", encoding="utf-8").write(svg_document(size, args.bg,
+                                                             lines))
+        print("[svg] wrote", path, flush=True)
+
+    # ---- automatic fill audit: render the fills and compare against the
+    #      allowed region. Reports (and visualizes, if --audit given)
+    #      overshoot (painted outside silhouette+1px) and shortfall
+    #      (silhouette pixels left unpainted). ----
+    import re as _re
+    import fitz
+    for suffix in ("_palette", "_mono"):
+        svg = open(args.out_prefix + suffix + ".svg", encoding="utf-8").read()
+        i0 = svg.find('<g id="Chain_')
+        i1 = svg.rfind("</g>")            # close of the last chain group
+        fills = svg[i0:i1 + 4] if i0 != -1 else ""
+        mini = ('<svg xmlns="http://www.w3.org/2000/svg" '
+                f'width="{size[0]}" height="{size[1]}" '
+                f'viewBox="0 0 {size[0]} {size[1]}">'
+                f'<rect width="{size[0]}" height="{size[1]}" '
+                f'fill="#FFFFFF"/>'
+                + "".join(clip_defs) + fills + "</svg>")
+        fn = os.path.join(rd, f"_audit{suffix}.svg")
+        open(fn, "w", encoding="utf-8").write(mini)
+        pm = fitz.open(fn)[0].get_pixmap(matrix=fitz.Matrix(1, 1))
+        rast = (np.frombuffer(pm.samples, np.uint8)
+                .reshape(pm.height, pm.width, pm.n)[:, :, :3])
+        painted = rast.min(axis=2) < 240
+        over = painted & ~allowed
+        short = union & ~painted
+        print(f"[audit{suffix}] overshoot px: {int(over.sum())}, "
+              f"shortfall px: {int(short.sum())} "
+              f"of {int(union.sum())} silhouette px", flush=True)
+        if getattr(args, "audit", None):
+            vis = rast.copy()
+            vis[over] = (255, 0, 0)
+            vis[short] = (255, 255, 0)
+            Image.fromarray(vis).save(args.audit + suffix + ".png")
+
+    if args.compare:
+        import fitz
+        rows = []
+        prev = Image.open(os.path.join(rd, "prev.png")).convert("RGB")
+        prev = prev.resize((1200, round(1200 * prev.height / prev.width)),
+                           Image.LANCZOS)
+        for suffix in ("_palette", "_mono"):
+            doc = fitz.open(args.out_prefix + suffix + ".svg")
+            pm = doc[0].get_pixmap(matrix=fitz.Matrix(0.5, 0.5))
+            vec = Image.frombytes("RGB", (pm.width, pm.height), pm.samples)
+            rows.append((prev, vec))
+        wmax = max(p.width for r in rows for p in r)
+        htot = sum(max(a.height, b.height) for a, b in rows) + 12 * (len(rows) + 1)
+        sheet = Image.new("RGB", (wmax * 2 + 36, htot), (230, 230, 230))
+        y = 12
+        for a, b2 in rows:
+            sheet.paste(a, (12, y))
+            sheet.paste(b2, (24 + a.width, y))
+            y += max(a.height, b2.height) + 12
+        sheet.save(args.compare)
+        print("[cmp] wrote", args.compare, flush=True)
+
+
+if __name__ == "__main__":
+    main()

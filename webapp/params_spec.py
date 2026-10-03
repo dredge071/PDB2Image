@@ -1,0 +1,229 @@
+"""Single source of truth for every user-facing parameter of the
+flat_trace pipeline (render -> vectorize -> AI export).
+
+The web form (app.py /api/params) and the documentation table
+(params.md, generated via `python params_spec.py --md`) are both built
+from SPEC, so the three can never drift apart.
+
+Entry fields:
+  id       form field name == CLI arg name (with "-"->"_")
+  stage    render | vectorize | export
+  type     int | float | bool | select | color | text
+  label    中文短名（表格 + 表单）
+  desc     中文说明
+  default  默认值
+  min/max/step  数值范围（表单控件用）
+  options  select 选项
+  modes    生效的表现模式 rep（空 = 全部）
+  cli      对应脚本的实际 CLI 名（缺省 = id，下划线还原为 -）
+"""
+import json
+import sys
+
+# 与 vectorize_flat.py 的 DEFAULT_PALETTE 一致（渲染端/矢量化端共用）
+CHAIN_PALETTE = ["#F2F0B0", "#C7C7F0", "#F7C2C7", "#BFEABF", "#FACF9F",
+                 "#C9B4F7", "#F2A19C", "#A7DBDB", "#FAD600", "#9CA8E0",
+                 "#E0A2DD", "#BDEB67", "#C1E8F5", "#E05A75", "#A6F0D2",
+                 "#E8E8C7", "#E3B4F7", "#FFA875", "#B2F2D6", "#A4B8E5"]
+
+SPEC = [
+    # ================= 公共 =================
+    dict(id="pdb", stage="render", type="file", default="",
+         label="PDB 结构文件",
+         desc="上传 .pdb/.ent；网站据此自动识别链并列出取色器"),
+    dict(id="rep", stage="render", type="select",
+         options=["cartoon", "surface", "both"], default="cartoon",
+         label="表现模式",
+         desc="cartoon=仅卡通；surface=仅表面（不透明正常上色）；"
+              "both=每链一层表面+卡通整体，表面做半透明浅色外壳"
+              "（fill-opacity 0.4），卡通在内部正常上色"),
+    dict(id="chains", stage="render", type="text", default="",
+         label="链选择",
+         desc="逗号分隔，如 A,B,C；留空=自动取 PDB 中全部 ATOM 链。"
+              "渲染与矢量化两端共用"),
+    dict(id="colors", stage="render", type="colors", default=CHAIN_PALETTE,
+         label="各链颜色",
+         desc="按链顺序取色（十六进制）；渲染端转成 0-1 RGB，"
+              "矢量化端转成 #HEX。mono 开启时只用第一格"),
+    # ================= 渲染端 render_flat.py（pymol-env） =================
+    dict(id="mono", stage="render", type="bool", default=False,
+         label="单色模式",
+         desc="所有链用同一颜色（取颜色选择器第一格）"),
+    dict(id="width", stage="render", type="int", default=2400,
+         min=800, max=4800, step=100, label="渲染宽度",
+         desc="1x 渲染宽度（px）。掩膜/深度通道自动渲染 2x；"
+              "mode-1 墨线通道固定 1x（线宽固定，放大相对变细会断线）。"
+              "surface 通道很慢，预览可用 1200"),
+    dict(id="height", stage="render", type="int", default=2132,
+         min=600, max=4300, step=100, label="渲染高度",
+         desc="1x 渲染高度（px），一般保持 2400:2132 的默认比例"),
+    dict(id="view", stage="render", type="select",
+         options=["auto", "orient"], default="auto", label="视角",
+         desc="auto=按链质心自动摆正三聚体（>=3 链）；orient=PyMOL orient"),
+    dict(id="workers", stage="render", type="int", default=0,
+         min=1, max=12, step=1, label="并行渲染进程数",
+         desc="渲染通道拆给几个 PyMOL 进程（0=自动，默认 4）。每个进程"
+              "约占 1GB 内存；1=串行。CPU 核多内存大可加大，近似线性加速",
+         cli="workers"),
+    dict(id="view_angles", stage="render", type="text", default="",
+         label="视角微调",
+         desc="在上述视角基础上绕 x,y,z 各旋转的度数，如 0,15,0；留空不转",
+         cli="view-angles"),
+    # ================= 矢量化端 vectorize_flat.py =================
+    dict(id="depth_bands", stage="vectorize", type="int", default=3,
+         min=1, max=6, step=1, label="卡通明暗层数",
+         desc="按雾深图把卡通分成几档深浅（1=纯平涂）；分档阈值取分位数",
+         cli="depth-bands", modes=["cartoon", "both"]),
+    dict(id="shade_step", stage="vectorize", type="float", default=0.10,
+         min=0.02, max=0.30, step=0.01, label="每档加深比例",
+         desc="卡通相邻明暗档之间颜色乘 0.9^(档序) 的步长",
+         cli="shade-step", modes=["cartoon", "both"]),
+    dict(id="surf_wash", stage="vectorize", type="float", default=0.25,
+         min=0.0, max=0.6, step=0.05, label="表面洗白比例",
+         desc="both 模式下表面颜色向白色混合的比例（配合 fill-opacity 0.4 "
+              "做半透明浅色外壳）；surface 单独模式恒不透明，此参数不生效",
+         cli="surf-wash", modes=["both"]),
+    dict(id="ink_color", stage="vectorize", type="color", default="#2D2A28",
+         label="墨线颜色",
+         desc="卡通墨线 RGB；表面墨线自动取 0.75*v+30 的浅灰版本",
+         cli="ink-color"),
+    dict(id="ink_dilate", stage="vectorize", type="select",
+         options=["0", "1"], default="0", label="卡通墨线粗细",
+         desc="0=细（约3px）；1=常规（约5px）。按 2400 输出画布计，"
+              "矢量化时实测带宽自动归一化，任意渲染宽度观感一致。"
+              "表面墨线恒为常规",
+         cli="ink-dilate"),
+    dict(id="mono_color", stage="vectorize", type="color", default="#7FA8D9",
+         label="mono 变体基色",
+         desc="同时输出的 _mono 单色版 SVG 的基色（逐链按 mono-step 加深）",
+         cli="mono-color"),
+    dict(id="mono_step", stage="vectorize", type="float", default=0.24,
+         min=0.0, max=0.5, step=0.02, label="mono 逐链加深",
+         desc="mono 变体中相邻链颜色乘 (1-step)^i",
+         cli="mono-step"),
+    dict(id="bg", stage="vectorize", type="color", default="#FFFFFF",
+         label="背景色", desc="SVG/.ai 画布背景色"),
+    dict(id="audit", stage="vectorize", type="bool", default=False,
+         label="填色审计图",
+         desc="额外输出 audit_*.png：红=超出轮廓的填色，黄=轮廓内漏填"),
+    # ================= 导出端 protein2vector_flat.py =================
+    dict(id="export_ai", stage="export", type="bool", default=False,
+         label="导出分层 .ai",
+         desc="调用本机 Adobe Illustrator（COM）把两个 SVG 转成保留 "
+             "Chain_A/B/C 图层的原生 .ai（PDF 兼容）。仅 Windows + "
+             "已装 Illustrator 可用；每链一层，层内含 cartoon/surface 子组"),
+]
+
+# 内置固定参数：不进表单，仅写进说明表（想改请改脚本源码）
+INTERNAL = [
+    dict(stage="render", name="平涂光照（卡通/表面通道）",
+         value="ambient 1.0 / direct 0.0 / specular 0 / fog 0 / gamma 1"),
+    dict(stage="render", name="表面明暗通道 surfshade",
+         value="ambient 0.45 / direct 0.55（亮暗分档依据）"),
+    dict(stage="render", name="三光折痕通道 shade0/120/240",
+         value="ambient 0.35 / direct 0.65，模型绕视轴转 0/120/240 度各一张"
+               "（预留内部棱线用，当前矢量化未使用）"),
+    dict(stage="render", name="雾深图 depth",
+         value="fog_start 0，雾贯穿整个深度 slab，近白远黑"),
+    dict(stage="render", name="多进程并行渲染",
+         value="渲染通道拆给 4 个 PyMOL 进程（--workers 默认自动=4，"
+               "可手动调；--workers 1 退回串行）。输出与串行逐字节一致；"
+               "内存按约 1GB/进程估算。注意：本环境 PyMOL 无 OpenMP，"
+               "单进程只能吃 1 核（逻辑线程），并行是多进程级的"),
+    dict(stage="render", name="抗锯齿 / surface_quality",
+         value="antialias 2 / surface_quality 1（surface 慢的主因，可降 0 提速）"),
+    dict(stage="render", name="通道分辨率",
+         value="掩膜/深度/SSE 2x，mode-1 墨线与预览 1x（mode-1 线宽固定像素）"),
+    dict(stage="render", name="预处理",
+         value="remove solvent + hetatm；只保留所选链"),
+    dict(stage="vectorize", name="描摹空间",
+         value="CANON_W=2400（所有掩膜/深度统一到此宽度再描）；"
+               "输出画布随之固定 2400，--width 仅保留兼容"),
+    dict(stage="vectorize", name="填色形状下限 / 简化 / 圆角",
+         value="MIN_AREA=260 px²，EPS=1.3，CORNER_DEG=35°（4x 上采样描摹）"),
+    dict(stage="vectorize", name="卡通填色外扩",
+         value="mask 外扩 4px 再裁到 silhouette+1px（消灭墨线内侧白缝）"),
+    dict(stage="vectorize", name="墨线临摹",
+         value="阈值>50 → 闭运算x2 → 膨胀x1（约3px带宽）→ 小于20px碎片丢弃 → "
+               "min_area=40, eps=1.2, corner_deg=45°（保交叉锐角）"),
+    dict(stage="vectorize", name="按链墨线分配",
+         value="全场景按最近链划分领土（各链掩膜外扩生长 16 轮），"
+               "每链只临摹自己领土内的墨线"),
+    dict(stage="vectorize", name="表面明暗分档阈值",
+         value="surfshade 亮度在 union 内的 66/33 百分位"),
+    dict(stage="vectorize", name="剪影 clipPath",
+         value="silhouette（4x 描摹）；MuPDF 预览不支持，以 Illustrator 为准"),
+    dict(stage="export", name="保存选项",
+         value="IllustratorSaveOptions pdfCompatible=true；超时 1200s；"
+               "图层名 = Chain_<链号>（AI 导入时 _ 转空格，脚本已处理）"),
+]
+
+
+def _rows(entries):
+    import textwrap
+    out = []
+    for e in entries:
+        if "default" in e:
+            d = e["default"]
+            if e.get("type") == "colors":
+                d = " ".join(d[:3]) + (" …" if len(d) > 3 else "")
+            d = json.dumps(d, ensure_ascii=False) if not isinstance(d, str) else d
+            if d == "":
+                d = "（空）"
+        else:
+            d = "—"
+        eff = ("、".join(e["modes"]) if e.get("modes") else "全部模式")
+        out.append((e, d, eff))
+    return out
+
+
+def markdown():
+    lines = ["# flat_trace 管线参数说明表",
+             "",
+             "三个阶段：**渲染**（render_flat.py，pymol-env）→ "
+             "**矢量化**（vectorize_flat.py，Python 主环境）→ "
+             "**.ai 导出**（protein2vector_flat.py + Illustrator COM）。"
+             "网站工具的表单与本表均由 `params_spec.py` 生成。",
+             ""]
+    heads = {"render": "一、渲染端（render_flat.py，pymol-env 运行）",
+             "vectorize": "二、矢量化端（vectorize_flat.py）",
+             "export": "三、导出端（protein2vector_flat.py）"}
+    for stage in ("render", "vectorize", "export"):
+        lines += [f"## {heads[stage]}", "",
+                  "| 参数 | 类型 | 默认值 | 生效模式 | 说明 |",
+                  "|---|---|---|---|---|"]
+        for e, d, eff in _rows([x for x in SPEC if x["stage"] == stage]):
+            t = {"colors": "颜色列表", "select": "选项"}.get(
+                e["type"], {"int": "整数", "float": "小数", "bool": "开关",
+                            "color": "颜色", "text": "文本"}.get(e["type"],
+                                                                e["type"]))
+            if e["type"] == "select":
+                t += "：" + "/".join(e["options"])
+            if e["type"] in ("int", "float") and "min" in e:
+                t += f"（{e['min']}~{e['max']}）"
+            if e["id"] == "pdb":
+                name = e["label"] + "（网站上传）"
+            else:
+                name = f"`{e.get('cli', e['id']).replace('_', '-')}`（{e['label']}）"
+            lines.append(f"| {name} | {t} | {d} | {eff} | {e['desc']} |")
+        lines.append("")
+    lines += ["## 四、内置固定参数（不进表单，改脚本源码）", "",
+              "| 阶段 | 参数 | 当前值 |", "|---|---|---|"]
+    for e in INTERNAL:
+        lines.append(f"| {e['stage']} | {e['name']} | {e['value']} |")
+    lines += ["", "## 五、输出文件一览（每次任务目录内）", "",
+              "| 文件 | 内容 |", "|---|---|",
+              "| render/prev.png | 渲染端平涂彩色栅格预览（1x） |",
+              "| flat_palette.svg | 彩色版分层矢量（每链一层） |",
+              "| flat_mono.svg | 单色版分层矢量（同时输出） |",
+              "| audit_palette/mono.png | 填色审计叠加图（开启审计时） |",
+              "| flat_palette.ai / flat_mono.ai | Illustrator 分层工程（开启导出时） |",
+              "| _job.log | 任务全程日志 |"]
+    return "\n".join(lines) + "\n"
+
+
+if __name__ == "__main__":
+    if "--md" in sys.argv:
+        sys.stdout.write(markdown())
+    else:
+        print(json.dumps(SPEC, ensure_ascii=False, indent=1))

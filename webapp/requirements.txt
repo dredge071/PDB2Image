@@ -1,0 +1,12 @@
+# 网站工具（app.py 所在解释器，即矢量化的主 Python 环境）
+flask>=3.0
+python-multipart
+
+# 矢量化阶段 vectorize_flat.py 的依赖
+numpy
+opencv-python
+pillow
+pymupdf
+
+# 渲染阶段不在本环境：render_flat.py 需要 PyMOL，请用独立的 pymol-env
+# （路径在 app.py 顶部 PYMOL_PY 或环境变量 FLAT_TRACE_PYMOL_PY 配置）
