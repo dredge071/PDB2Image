@@ -1,0 +1,18 @@
+# PDB2Image 依赖清单
+#
+# 渲染端（render_flat.py）需要能 import pymol 的解释器，推荐整包用
+# conda 安装（pymol-open-source 及其自带的 numpy 等一并装好），见
+# README「安装」：
+#
+#   conda create -p ../pymol-env -c conda-forge ^
+#       pymol-open-source flask python-multipart numpy opencv pillow pymupdf
+#
+# 矢量化阶段（vectorize_flat.py）和网站工具（webapp/app.py）跑在主
+# Python 环境即可，依赖与 webapp/requirements.txt 相同：
+
+flask>=3.0
+python-multipart
+numpy
+opencv-python
+pillow
+pymupdf

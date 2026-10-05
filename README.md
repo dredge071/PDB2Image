@@ -3,7 +3,7 @@
 **PDB2Image 是干什么的**：画蛋白结构图时，PyMOL 的位图导出放大就糊、
  illustrator 手描又太费劲。PDB2Image 让 PyMOL 以无光影平涂方式渲染结构，
 再把渲染结果**临摹成分层矢量图**——每条链是独立图层，填色、按雾深分档的
-明暗、mode-1 墨线全部是真正的矢量路径，可无限放大、逐条链拖动、改色、
+明暗、墨线全部是真正的矢量路径，可无限放大、逐条链拖动、改色、
 重排版，直接出 SVG / Adobe Illustrator 图，方便细节精修。
 
 <p align="center">
@@ -25,8 +25,8 @@
 
 | 位置 | 内容 |
 |---|---|
-| `render_flat.py` | 阶段① 渲染（PyMOL 环境运行）：输出各链掩膜、雾深图、mode-1 墨线、表面通道。通道拆分给多个 PyMOL 进程并行渲染（`--workers`，默认自动=4；`--workers 1` 串行），输出与串行逐字节一致 |
-| `vectorize_flat.py` | 阶段② 矢量化（主 Python）：按链填色 + 按链墨线临摹 → `flat_palette.svg` / `flat_mono.svg` |
+| `render_flat.py` | 阶段① 渲染（PyMOL 环境运行）：输出各链掩膜、雾深图、mode-1 墨线、表面通道（含表面雾深图）。通道拆分给多个 PyMOL 进程并行渲染（`--workers`，默认自动=4；`--workers 1` 串行），输出与串行逐字节一致 |
+| `vectorize_flat.py` | 阶段② 矢量化（主 Python）：按链填色 + 按链墨线临摹 → `flat_palette.svg` / `flat_mono.svg`。卡通墨线默认从雾深图检测深度跳变边缘（ChimeraX 式轮廓），表面墨线临摹 PyMOL mode-1 光栅 |
 | `vec_core.py` | 描摹原语（trace_mask / svg_document 等），flat_trace 自包含，不依赖其他项目目录 |
 | `protein2vector_flat.py` | 阶段③ .ai 导出：驱动本机 Illustrator（COM）转分层 .ai |
 | `templates/ai_export_template.jsx` | Illustrator 导出用的 JSX 模板 |
@@ -128,7 +128,7 @@ conda create -n pymol -c conda-forge pymol-open-source
 几点经验值（默认值即推荐值，都实测验证过）：
 
 - **并行渲染进程数**：直接用页面上方资源检测给出的推荐值（每个进程约占 1GB 左右内存）；设 `1` = 串行；
-- **视角**：3 链以上用 `auto`（按链质心自动摆正）通常效果就很好；不满意再用"视角微调"小角度转（如 `0,15,0`），暂时还没有在网页里加可视化旋转角度的功能，后面补上；
+- **视角**：3 链以上用 `auto`（按链质心自动摆正）通常效果就很好；也可以在 3D 预览卡里直接拖转到想要的姿态，角度会自动填进表单；
 - **卡通墨线粗细**：`0`（细）正常出图选0就好；`1`（常规）会粗一点；
 - **勾选"填色审计图"**可以检查红（超出轮廓）/黄（漏填），正常应接近全白；
 - 明暗层次：卡通 3 档（depth-bands=3）+ 每档加深 0.10、表面洗白 0.25 是调好的默认组合，一般不用动。
@@ -162,9 +162,12 @@ python protein2vector_flat.py --out-dir out ^
 
 - **cartoon 与 both 的卡通部分**：`depth-bands`（明暗档数，默认 3；1 = 纯平涂）、
   `shade-step`（每档加深比例，默认 0.10）、`ink-color` / `ink-dilate`（墨线颜色与粗细）；
+- **卡通墨线来源**：默认从 2x 雾深图检测深度跳变边缘（ChimeraX 式描边，
+  断连少、粗细均匀；`--ink-source mode1` 可退回 PyMOL mode-1 光栅临摹）；
+  表面墨线恒用 mode-1 临摹（平滑表面壳的内部褶皱在雾深图里不可见）；
 - **both 的表面壳**：`surf-wash`（表面颜色向白色混合的比例，默认 0.25，配合
-  固定的 fill-opacity 0.4 半透明；surface 单独模式恒不透明，此参数不生效）；
-- 表面墨线自动取墨线颜色的浅灰版本，恒为常规粗细；
+  固定的 fill-opacity 0.5 半透明；surface 单独模式恒不透明，此参数不生效）；
+- 表面墨线自动取墨线颜色的浅一档版本，恒为常规粗细；
 - 每种模式都同时输出**彩色版** `flat_palette.svg` 和**单色版** `flat_mono.svg`
   （单色按链逐条加深，勾选"单色模式"则主版直接单色）。
 
@@ -196,7 +199,7 @@ visible 并在日志说明），渲染时间比较长。
 ## 依赖小结
 
 - 渲染：独立 PyMOL 环境（PyMOL 3.x；本管线会多进程并行调用，`--workers 1` 退回串行）
-- 矢量化 / 网站：numpy、opencv-python、pillow、pymupdf、flask（见 `webapp/requirements.txt`）
+- 矢量化 / 网站：numpy、opencv-python、pillow、pymupdf、flask（见根 `requirements.txt` 或 `webapp/requirements.txt`）
 - .ai 导出：Windows + 本机 Adobe Illustrator（COM）；导出结束后自动关闭 Illustrator
 - 自包含：`vec_core.py` 内置全部描摹原语，仓库不依赖其他项目目录
 
