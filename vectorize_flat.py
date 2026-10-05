@@ -554,7 +554,7 @@ def main():
     ap.add_argument("--ink-dilate", type=int, default=0, choices=[0, 1],
                     help="cartoon ink band: 0=thin ~1.5px, 1=regular ~3px")
     ap.add_argument("--ink-source", choices=["mode1", "depth"],
-                    default="mode1",
+                    default="depth",
                     help="cartoon ink source: mode1 = trace PyMOL's "
                          "ray_trace_mode-1 raster; depth = detect "
                          "depth-jump edges on the native 2x fog-depth "
