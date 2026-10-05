@@ -636,6 +636,34 @@ def main():
     allowed = cv2.dilate(union.astype(np.uint8), np.ones((3, 3), np.uint8),
                          iterations=1).astype(bool)
 
+    # ---- cartoon fill regions: grow each chain 2px UNDER the ink, then
+    #      hand contact strips to the chain that is NEARER in the depth
+    #      map. A plain grow lets a background chain's colour spill over
+    #      a foreground chain at contacts (paint order is fixed below by
+    #      the same arbitration, but the region itself must not claim
+    #      occluded ground). fill_reg[ch] is what chain ch may paint. ----
+    fill_reg = {}
+    if have_cart:
+        k3f = np.ones((3, 3), np.uint8)
+        grown_all = {}
+        for ch in chains:
+            grown_all[ch] = cv2.dilate(masks[ch].astype(np.uint8), k3f,
+                                       iterations=2).astype(bool)
+        # per-chain mean depth of its own mask = how near the chain is
+        chain_near = {ch: float(dim[masks[ch]].mean()) for ch in chains}
+        for ch in chains:
+            reg = grown_all[ch].copy()
+            for oc in chains:
+                if oc == ch:
+                    continue
+                # pixels the OTHER chain also claims with its own grow:
+                # give them to the nearer chain
+                contested = grown_all[oc] & ~masks[ch]
+                if chain_near[oc] > chain_near[ch]:
+                    reg &= ~contested
+            reg &= allowed
+            fill_reg[ch] = reg
+
     # ---- nearest-chain partition of the scene: every pixel is grown out
     #      to its closest chain so per-chain ink tracing keeps only that
     #      chain's own lines (the ink render is full-scene) ----
@@ -986,7 +1014,13 @@ def main():
         Assembled look is unchanged (visible content paints on top);
         releasing the clip in Illustrator exposes the occluded parts."""
         groups = []
-        for ci, ch in enumerate(chains):
+        # paint chains BACK-TO-FRONT: contact strips are depth-
+        # arbitrated in fill_reg, but overlapping bezier edges still
+        # decide by draw order - nearer chains must paint later
+        order = sorted(range(len(chains)),
+                       key=lambda i: chain_near.get(chains[i], 0.0))
+        for ci in order:
+            ch = chains[ci]
             def cart_col():
                 return (colors[ch] if variant == "palette"
                         else "#%02X%02X%02X" % scale_hex(
@@ -1059,9 +1093,7 @@ def main():
 
             if have_cart:
                 col_hex = cart_col()
-                m = masks[ch].astype(np.uint8)
-                grown = cv2.dilate(m, np.ones((3, 3), np.uint8), iterations=4)
-                fm = (grown & allowed).astype(bool)
+                fm = fill_reg[ch]
                 fills = chain_fills(fm, dim, thresholds, col_hex,
                                     args.shade_step, allowed=allowed)
                 ci_ink = [(d, ink_rgb) for d in cart_ink[ch]]
