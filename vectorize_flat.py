@@ -36,6 +36,26 @@ MIN_AREA = 260          # at 2400
 EPS = 1.3
 CORNER_DEG = 35.0
 
+
+def clean_band(b, band_min=None):
+    """De-speckle a thresholded shading band: smooth ray noise turns a
+    hard cut into hundreds of islands and pinholes (the 'crackle'
+    artifact), so close, open, fill pinholes, drop debris islands."""
+    h, w = b.shape
+    band_min = band_min or max(MIN_AREA * 6, 1500)
+    m = b.astype(np.uint8)
+    m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
+    m = cv2.morphologyEx(m, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+    ff = m.copy()
+    pad = np.zeros((h + 2, w + 2), np.uint8)
+    cv2.floodFill(ff, pad, (0, 0), 1)
+    m[ff == 0] = 1                       # fill interior pinholes
+    n, lab, stats, _ = cv2.connectedComponentsWithStats(m, 8)
+    for i in range(1, n):
+        if stats[i, 4] < band_min:
+            m[lab == i] = 0              # drop debris islands
+    return m.astype(bool)
+
 DEFAULT_PALETTE = ["#F2F0B0", "#C7C7F0", "#F7C2C7", "#BFEABF", "#FACF9F",
                    "#C9B4F7", "#F2A19C", "#A7DBDB", "#FAD600", "#9CA8E0",
                    "#E0A2DD", "#BDEB67", "#C1E8F5", "#E05A75", "#A6F0D2",
@@ -106,6 +126,46 @@ def smooth_open(pts, win=5, rounds=1):
             sm[:, d] = np.convolve(ext[:, d], ker, mode="same")[k:k + len(pts)]
         pts = sm
     return pts
+
+
+def collapse_double_strands(S, max_rounds=4):
+    """Zhang-Suen leaves 2px-wide sections on even-width strokes; every
+    pixel there reads as a graph junction, which later shows as dashes
+    (the section's micro-edges) or beads (disks painted on the nodes).
+    Collapse each fully-set 2x2 block by removing the corner pixel whose
+    removal keeps its neighbours 8-connected. Returns a真-1px skeleton."""
+    S = S.copy()
+    for _ in range(max_rounds):
+        t = S.astype(np.uint8)
+        blk = (t[1:, 1:] & t[:-1, 1:] & t[1:, :-1] & t[:-1, :-1])
+        ys, xs = np.nonzero(blk)
+        if not len(ys):
+            break
+        removed_any = False
+        for y, x in zip((ys + 1).tolist(), (xs + 1).tolist()):
+            # neighbours of (y, x) except itself
+            nbrs = [(y + dy, x + dx) for dy, dx in OFFS8
+                    if 0 <= y + dy < S.shape[0] and 0 <= x + dx < S.shape[1]
+                    and S[y + dy, x + dx]]
+            if len(nbrs) < 2:
+                continue
+            # does removing p keep nbrs in one 8-connected group?
+            nset = set(nbrs)
+            stack = [nbrs[0]]
+            seen = {nbrs[0]}
+            while stack:
+                cy, cx = stack.pop()
+                for dy, dx in OFFS8:
+                    q = (cy + dy, cx + dx)
+                    if q in nset and q not in seen:
+                        seen.add(q)
+                        stack.append(q)
+            if len(seen) == len(nset):
+                S[y, x] = False
+                removed_any = True
+        if not removed_any:
+            break
+    return S
 
 
 def prune_spurs(S, rounds=2):
@@ -179,12 +239,29 @@ def bridge_endpoints(S, max_dist=18.0, min_dot=-0.4, max_perp=3.5):
     return S.astype(bool)
 
 
+def skeleton_polylines(S, scale, min_len, smooth_win=9, smooth_rounds=2):
+    """Skeleton pixel graph -> merged, SMOOTHED open polylines.
+
+    Edges between junction/endpoint nodes are merged THROUGH nodes by
+    direction continuity (a pen crossing an intersection without lifting),
+    then smoothed and returned as (n, 2) float point arrays. Callers can
+    stroke them directly or thicken them into ribbon masks."""
+    return _skeleton_polyline_impl(S, scale, min_len, smooth_win,
+                                   smooth_rounds, emit_d=False)
+
+
 def skeleton_strokes(S, scale, eps, min_len):
     """Skeleton pixel graph -> merged vector strokes -> one 'd' per stroke.
 
     Edges between junction/endpoint nodes are merged THROUGH nodes by
     direction continuity (a pen crossing an intersection without lifting),
     then smoothed and emitted as open-path beziers."""
+    return _skeleton_polyline_impl(S, scale, min_len, 9, 2, emit_d=True,
+                                   eps=eps)
+
+
+def _skeleton_polyline_impl(S, scale, min_len, smooth_win, smooth_rounds,
+                            emit_d, eps=1.5):
     H, W = S.shape
     nb = np.zeros((H, W), np.uint8)
     for dy, dx in OFFS8:
@@ -289,7 +366,7 @@ def skeleton_strokes(S, scale, eps, min_len):
                     chain[:0] = pl2[:-1]
         merged.append(chain)
 
-    # ---- polylines -> smooth open-path bezier 'd' ----
+    # ---- polylines -> smoothed points (or bezier 'd') ----
     out = []
     for path in merged:
         if len(path) < 2:
@@ -299,7 +376,10 @@ def skeleton_strokes(S, scale, eps, min_len):
         if length < min_len:
             continue
         if len(a) > 4:
-            a = smooth_open(a, 9, 2)
+            a = smooth_open(a, smooth_win, smooth_rounds)
+        if not emit_d:
+            out.append(a)
+            continue
         # closed=False: these are OPEN strokes - with closed=True the
         # decimator treats start/end as neighbours and manufactures
         # straight chords across the canvas
@@ -338,7 +418,9 @@ def chain_fills(mask, depth, thresholds, color_hex, shade_step, allowed=None):
     always sits on an existing fill (no background-colored seams).
     Tracing happens at 4x (subpixel edges), and the raster is clipped to
     `allowed` AT 4x before tracing, so the traced boundary follows the
-    allowed region itself - overshoot from bezier smoothing is gone."""
+    allowed region itself - overshoot from bezier smoothing is gone.
+
+    Depth bands are de-speckled by clean_band() before tracing."""
     up = 4
     h, w = mask.shape
 
@@ -356,6 +438,9 @@ def chain_fills(mask, depth, thresholds, color_hex, shade_step, allowed=None):
     for j, t in enumerate(thresholds):
         deep = mask & (depth <= t)
         if deep.sum() < 40:
+            continue
+        deep = clean_band(deep)
+        if not deep.any():
             continue
         col = scale_hex(color_hex, 1.0 - (j + 1) * shade_step)
         shapes += [(d, col) for d in trace_mask(prep(deep),
@@ -390,6 +475,19 @@ def main():
                     help="both mode: whiten the surface tone (pale shell)")
     ap.add_argument("--ink-dilate", type=int, default=0, choices=[0, 1],
                     help="cartoon ink band: 0=thin ~1.5px, 1=regular ~3px")
+    ap.add_argument("--ink-source", choices=["mode1", "depth"],
+                    default="mode1",
+                    help="cartoon ink source: mode1 = trace PyMOL's "
+                         "ray_trace_mode-1 raster; depth = detect "
+                         "depth-jump edges on the native 2x fog-depth "
+                         "map (ChimeraX-style), cleaner for cartoon. "
+                         "Falls back to mode1 when depth.png is missing")
+    ap.add_argument("--ink-depth-t", type=float, default=100.0,
+                    help="depth-ink: STRONG-edge gradient threshold in "
+                         "0-255 depth units (calibrated: gradient dist is "
+                         "bimodal, p90 approx 9 = noise vs p99 approx 500 "
+                         "= real jumps). Weak extension threshold is 30 "
+                         "percent of this")
     ap.add_argument("--width", type=int, default=2400)
     ap.add_argument("--bg", default="#FFFFFF")
     ap.add_argument("--compare", default="")
@@ -513,12 +611,11 @@ def main():
     #      the ink PNG is a full-scene render, so each trace is restricted
     #      to the chain's own territory instead of handing the whole
     #      trimer's ink to every chain layer ----
-    def ink_raw_of(png, target_px):
-        """Canonicalize an ink render to CANON_W, then normalize the
-        measured stroke width to target_px (canvas units). Mode-1 outlines
-        are a fixed ~2px at ANY render width, so a 600px render upscaled
-        4x would otherwise give 4x-too-fat lines; erode/dilate by the
-        measured excess instead of a fixed per-mode dilation."""
+    def ink_raw_of(png):
+        """Canonicalize an ink render to CANON_W and binarize it. No width
+        normalization here: ink_paths_keep rebuilds every stroke as a
+        fixed-width ribbon around its skeleton centerline, so the drawn
+        line weight is identical at every render resolution."""
         im = Image.open(png).convert("RGB")
         if im.width != CANON_W:
             im = im.resize((CANON_W, round(im.height * CANON_W / im.width)),
@@ -527,53 +624,158 @@ def main():
         raw = (a.min(axis=2) > 50).astype(np.uint8) * 255
         raw = cv2.morphologyEx(raw, cv2.MORPH_CLOSE,
                                np.ones((3, 3), np.uint8), iterations=2)
-        sk = thinning(raw > 0)
-        n = int(sk.sum())
-        if n:
-            w = (raw > 0).sum() / n
-            k = np.ones((3, 3), np.uint8)
-            if w > target_px + 1:
-                # overweight (low-res render upscaled): rebuild from the
-                # 1px skeleton - erosion would break thin segments
-                raw = sk.astype(np.uint8) * 255
-                extra = max(1, int(round(target_px / 2.0)))
-                raw = cv2.dilate(raw, k, iterations=extra)
-                print(f"[vec] ink width: measured {w:.1f}px -> skeleton "
-                      f"rebuilt ~{1 + 2 * extra}px", flush=True)
-            elif w < target_px - 1:
-                it = int(round((target_px - w) / 2.0))
-                raw = cv2.dilate(raw, k, iterations=it)
-                print(f"[vec] ink width: measured {w:.1f}px -> dilated "
-                      f"+{it} iters", flush=True)
-            else:
-                print(f"[vec] ink width: measured {w:.1f}px, on target",
-                      flush=True)
         return raw
 
-    def ink_paths_keep(raw, keep):
-        r = raw & (keep.astype(np.uint8) * 255)
-        n, labels, stats, _ = cv2.connectedComponentsWithStats(r,
-                                                               connectivity=8)
-        for i in range(1, n):
-            if stats[i, 4] < 20:
-                r[labels == i] = 0
-        # G1-continuous reconstruction: smooth curves, sharp junctions
-        return [d for d in trace_mask_g1(r, min_area=40, scale=1.0,
-                                         eps=1.2, corner_deg=80.0)]
+    def ink_centerlines(raw):
+        """Full-scene ink centerline polylines: skeleton of the CONTINUOUS
+        ink mask, merged through junctions, smoothed.
 
-    # cartoon ink weight selectable (targets in 2400-canvas px, honored
-    # at every render width); surface ink keeps the fuller band
-    cart_target = 1.5 if args.ink_dilate == 0 else 3.0
-    cart_raw = (ink_raw_of(os.path.join(rd, "ink.png"), cart_target)
-                if have_cart else None)
-    surf_raw = (ink_raw_of(os.path.join(rd, "surfink.png"), 3.0)
-                if have_surf else None)
-    cart_ink = {ch: (ink_paths_keep(cart_raw, chain_lbl == ci)
-                     if have_cart else [])
-                for ci, ch in enumerate(chains)}
-    surf_ink = {ch: (ink_paths_keep(surf_raw, chain_lbl == ci)
-                     if have_surf else [])
-                for ci, ch in enumerate(chains)}
+        The skeleton is deliberately computed on the FULL-SCENE mask, not
+        on per-chain-restricted masks: the chain-territory partition cuts
+        the ink into fragments, and a skeleton of fragments wanders
+        through the gaps between them - visibly OFF the ink line. One
+        clean skeleton, split into chains afterwards, is the fix."""
+        S = thinning(cv2.dilate((raw > 0).astype(np.uint8) * 255,
+                                np.ones((3, 3), np.uint8), iterations=2) > 0)
+        S = collapse_double_strands(S)
+        S = prune_spurs(S, rounds=2)
+        # smooth the centerline BEFORE thickening: the raw 1px skeleton
+        # zigzags at pixel scale and the ribbon inherits every step.
+        # skeleton_polylines merges through junctions and applies the
+        # same smoothing the .ai heritage path used (window 9, 2 rounds)
+        return skeleton_polylines(S, scale=1.0, min_len=2.0)
+
+    def ink_paths_keep(pls, width_px, label=None):
+        """One chain's share of the scene centerlines as uniform-width
+        filled ribbon paths.
+
+        Each polyline is split into runs by chain territory (the
+        nearest-chain partition); boundary points belong to BOTH chains
+        so neighbouring ribbons abut seamlessly. Ribbons are drawn at 2x
+        and downscaled: the smoothed centerline points are sub-pixel, and
+        rounding them onto the 1px grid re-introduced the zigzag. eps=1.2
+        needs the ribbon comfortably wider than 2*eps (4-5px here leaves
+        >1px of safety; the old 3px ribbons crossed walls and crackled,
+        cancelling strips of ink - the 'crackle' artifact)."""
+        H, W = chain_lbl.shape
+        up = 2
+        m = np.zeros((H * up, W * up), dtype=np.uint8)
+        th = int(width_px * up)
+        for a in pls:
+            if label is None:
+                # solo render: a single chain, no territory to split by
+                cv2.polylines(m, [np.round(a * up).astype(np.int32)],
+                              False, 255, thickness=th)
+                continue
+            xi = np.clip(np.round(a[:, 0]).astype(int), 0, W - 1)
+            yi = np.clip(np.round(a[:, 1]).astype(int), 0, H - 1)
+            labs = chain_lbl[yi, xi]
+            brk = np.nonzero(np.diff(labs))[0]
+            start = 0
+            for b in list(brk) + [len(a) - 1]:
+                seg = a[max(0, start - 1):b + 2]   # 1-pt overlap both sides
+                if len(seg) >= 2 and labs[start] == label:
+                    cv2.polylines(m, [np.round(seg * up).astype(np.int32)],
+                                  False, 255, thickness=th)
+                start = b + 1
+        if not (m > 0).any():
+            return []
+        m = cv2.resize(m, (W, H), interpolation=cv2.INTER_AREA)
+        m = ((m > 127).astype(np.uint8)) * 255
+        return trace_mask_g1(m, min_area=25, scale=1.0, eps=1.2,
+                             corner_deg=80.0)
+
+    def depth_edge_pls(dep_png, allow):
+        """Cartoon ink from DEPTH-JUMP edges (ChimeraX principle): Sobel
+        gradient of the raw fog-depth render, thresholded, clipped to the
+        cartoon silhouette, then the SAME skeleton->smooth->ribbon backend
+        the mode-1 path uses.
+
+        Detected at the depth map's NATIVE 2x resolution (the threshold
+        was calibrated there; canonical upscaling would dilute gradients
+        by a fixed W2->CANON_W factor) and lifted into canvas coordinates
+        by skeleton_polylines' scale. The RAW depth is used, not the
+        lo/hi-normalized dim: percentile clipping flattens the depth
+        tails and would forge or lose edges exactly there."""
+        dep = Image.open(dep_png).convert("L")
+        a8 = np.asarray(dep, dtype=np.uint8)
+        a = a8.astype(np.float32) / 255.0
+        gx = cv2.Sobel(a, cv2.CV_32F, 1, 0, ksize=3)
+        gy = cv2.Sobel(a, cv2.CV_32F, 0, 1, ksize=3)
+        # gradient magnitude in 0-255 depth units. The distribution is
+        # strongly bimodal (p90 ~ 9, p99 ~ 500 on the test complex):
+        # real depth jumps vs quantization noise, cleanly separable.
+        # HYSTERESIS instead of a single cut: a silhouette/occlusion
+        # edge crosses smooth ramps where its gradient sags, and a
+        # single threshold breaks the line exactly there. Strong pixels
+        # seed; weak-but-connected pixels extend the line through the
+        # sag; weak components with no strong pixel (noise contours)
+        # drop out. (Canny's own NMS output fragments the same way -
+        # the ragged ridge defeats NMS too - so do it on the raw mask.)
+        g = np.hypot(gx, gy) * 255.0
+        strong = (g > args.ink_depth_t) & allow
+        weak = (g > args.ink_depth_t * 0.3) & allow
+        nl, lab = cv2.connectedComponents(weak.astype(np.uint8), 8)
+        keep = np.unique(lab[strong])
+        raw = np.isin(lab, keep[keep != 0]).astype(np.uint8) * 255
+        k3 = np.ones((3, 3), np.uint8)
+        raw = cv2.morphologyEx(raw, cv2.MORPH_CLOSE, k3, iterations=1)
+        S = thinning(raw > 0)
+        S = collapse_double_strands(S)
+        S = prune_spurs(S, rounds=3)
+        # reconnect small residual breaks: collinear endpoints facing
+        # each other (the heritage bridge; safe here because this mask
+        # is one continuous full-scene network, not territory-cut ink)
+        S = bridge_endpoints(S, max_dist=25.0)
+        return skeleton_polylines(S, scale=CANON_W / dep.width, min_len=2.0)
+
+    def native_allow(png_fmt, extra_png=None):
+        """Cartoon-pixels-only allow mask at the DEPTH map's native
+        resolution: the depth band straddles the silhouette (its AA ramp
+        and the mask's >128 threshold disagree by ~1px), so unrestricted
+        edges would draw lines OUTSIDE the object. Dilate 2px keeps the
+        line ON the silhouette without clipping interior creases."""
+        dep = Image.open(os.path.join(rd, "depth.png"))
+        Wn, Hn = dep.size
+        del dep
+        un = np.zeros((Hn, Wn), dtype=bool)
+        for ch in chains:
+            un |= np.array(Image.open(os.path.join(
+                rd, png_fmt.format(ch=ch))).convert("L")
+                .resize((Wn, Hn), Image.BILINEAR)) > 128
+        if extra_png:
+            un |= np.array(Image.open(os.path.join(rd, extra_png)
+                                      ).convert("L").resize((Wn, Hn),
+                                                            Image.BILINEAR)
+                           ) > 128
+        return cv2.dilate(un.astype(np.uint8), np.ones((3, 3), np.uint8),
+                          iterations=2).astype(bool)
+
+    # ink weights (2400-canvas px, identical at every render width):
+    # cartoon 4px (5px with --ink-dilate 1), surface 5px; the extra px
+    # over the old 3px buys eps=1.2 smoothing without wall-crossing
+    cart_w = 4.0 if args.ink_dilate == 0 else 5.0
+    surf_w = 5.0
+    use_depth_ink = (args.ink_source == "depth"
+                     and os.path.exists(os.path.join(rd, "depth.png")))
+    if use_depth_ink:
+        print(f"[vec] cartoon ink source: depth-jump "
+              f"(hysteresis {args.ink_depth_t:.0f}/"
+              f"{args.ink_depth_t * 0.3:.0f})", flush=True)
+        allow_cart = native_allow("mask{ch}.png")
+        cart_pls = depth_edge_pls(os.path.join(rd, "depth.png"),
+                                  allow_cart)
+    else:
+        cart_pls = (ink_centerlines(
+                        ink_raw_of(os.path.join(rd, "ink.png")))
+                    if have_cart else [])
+    surf_pls = (ink_centerlines(ink_raw_of(os.path.join(rd, "surfink.png")))
+                if have_surf else [])
+    cart_ink, surf_ink = {}, {}
+    for ci, ch in enumerate(chains):
+        ci_ = ci
+        cart_ink[ch] = ink_paths_keep(cart_pls, cart_w) if have_cart else []
+        surf_ink[ch] = ink_paths_keep(surf_pls, surf_w) if have_surf else []
     for ch in chains:
         print(f"[vec] ink {ch}: cart={len(cart_ink[ch])} "
               f"surf={len(surf_ink[ch])} paths", flush=True)
@@ -626,21 +828,38 @@ def main():
                     solo_smasks[ch].astype(np.uint8), k3,
                     iterations=1).astype(bool)
         for ch in chains:
+            # solo renders contain only this chain's ink, so there is no
+            # territory to split by - centerlines go straight to ribbons
             if have_cart:
-                raw = ink_raw_of(os.path.join(rd, f"soloink{ch}.png"),
-                                 cart_target)
-                # generous window: a solo render has no other chains' ink
-                # to exclude, and the mode-1 outline straddles the mask
-                # edge - a tight keep would shave off its outer half
-                keep = cv2.dilate(solo_masks[ch].astype(np.uint8), k3,
-                                  iterations=16).astype(bool)
-                solo_cart_ink[ch] = ink_paths_keep(raw, keep)
+                if use_depth_ink and os.path.exists(
+                        os.path.join(rd, f"solodepth{ch}.png")):
+                    # solo: the chain's own silhouette at native res is
+                    # the allow mask; no territory split needed either way
+                    dep = Image.open(os.path.join(rd, f"solodepth{ch}.png"))
+                    Wn, Hn = dep.size
+                    del dep
+                    sn = np.array(Image.open(
+                        os.path.join(rd, f"solomask{ch}.png")
+                        ).convert("L").resize((Wn, Hn), Image.BILINEAR)) > 128
+                    sn = cv2.dilate(sn.astype(np.uint8),
+                                    np.ones((3, 3), np.uint8),
+                                    iterations=2).astype(bool)
+                    solo_cart_ink[ch] = ink_paths_keep(
+                        depth_edge_pls(os.path.join(rd, f"solodepth{ch}.png"),
+                                       sn),
+                        cart_w)
+                else:
+                    solo_cart_ink[ch] = ink_paths_keep(
+                        ink_centerlines(
+                            ink_raw_of(os.path.join(rd,
+                                                    f"soloink{ch}.png"))),
+                        cart_w)
             if have_surf:
-                raw = ink_raw_of(os.path.join(rd, f"solosurfink{ch}.png"),
-                                 3.0)
-                keep = cv2.dilate(solo_smasks[ch].astype(np.uint8), k3,
-                                  iterations=16).astype(bool)
-                solo_surf_ink[ch] = ink_paths_keep(raw, keep)
+                solo_surf_ink[ch] = ink_paths_keep(
+                    ink_centerlines(
+                        ink_raw_of(os.path.join(rd,
+                                       f"solosurfink{ch}.png"))),
+                    surf_w)
             print(f"[vec] solo ink {ch}: cart={len(solo_cart_ink.get(ch, []))}"
                   f" surf={len(solo_surf_ink.get(ch, []))} paths", flush=True)
 
@@ -688,12 +907,12 @@ def main():
                     fills = chain_fills(sfm, solo_dim[ch], thresholds,
                                         cart_col(), args.shade_step,
                                         allowed=salw)
-                    ci_ink = [(d, ink_rgb) for d in solo_cart_ink[ch]]
                     lines.append(f'<g id="Chain_{ch}_full_cartoon">')
                     lines += [f'<path d="{d}" fill="rgb({c[0]},{c[1]},{c[2]})"/>'
                               for d, c in fills]
                     lines += [f'<path d="{d}" fill="rgb({c[0]},{c[1]},{c[2]})"/>'
-                              for d, c in ci_ink]
+                              for d, c in [(d, ink_rgb) for d in
+                                           solo_cart_ink[ch]]]
                     lines.append("</g>")
                     print(f"[vec] {variant} full cart {ch}: "
                           f"{len(fills)} paths", flush=True)
@@ -710,16 +929,16 @@ def main():
                     alw = solo_surf_allow[ch]
                     fills = ([(d, base) for d in band_paths(s_sm, alw)]
                              + [(d, mid) for d in
-                                band_paths(s_sm & (s_lum < sthr_hi), alw)]
+                                band_paths(clean_band(s_sm & (s_lum < sthr_hi)), alw)]
                              + [(d, dark) for d in
-                                band_paths(s_sm & (s_lum < sthr_lo), alw)])
-                    si = [(d, surf_ink_rgb) for d in solo_surf_ink[ch]]
+                                band_paths(clean_band(s_sm & (s_lum < sthr_lo)), alw)])
                     op = ' fill-opacity="0.4"' if rep == "both" else ""
                     lines.append(f'<g id="Chain_{ch}_full_surface"{op}>')
                     lines += [f'<path d="{d}" fill="rgb({c[0]},{c[1]},{c[2]})"/>'
                               for d, c in fills]
                     lines += [f'<path d="{d}" fill="rgb({c[0]},{c[1]},{c[2]})"/>'
-                              for d, c in si]
+                              for d, c in [(d, surf_ink_rgb) for d in
+                                           solo_surf_ink[ch]]]
                     lines.append("</g>")
                     print(f"[vec] {variant} full surf {ch}: "
                           f"{len(fills)} paths", flush=True)
@@ -755,9 +974,9 @@ def main():
                 dark = tuple(int(v * 0.85) for v in base)
                 fills = [(d, base) for d in band_paths(smasks[ch])]
                 fills += [(d, mid) for d in
-                          band_paths(smasks[ch] & (slum < sthr_hi))]
+                          band_paths(clean_band(smasks[ch] & (slum < sthr_hi)))]
                 fills += [(d, dark) for d in
-                          band_paths(smasks[ch] & (slum < sthr_lo))]
+                          band_paths(clean_band(smasks[ch] & (slum < sthr_lo)))]
                 si = [(d, surf_ink_rgb) for d in surf_ink[ch]]
                 op = ' fill-opacity="0.4"' if rep == "both" else ""
                 vis.append(f'<g id="Chain_{ch}_surface"{op}>')
