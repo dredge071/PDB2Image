@@ -682,6 +682,21 @@ def main():
             return []
         m = cv2.resize(m, (W, H), interpolation=cv2.INTER_AREA)
         m = ((m > 127).astype(np.uint8)) * 255
+        # post-fuse at RIBBON level: skeletonization shatters the line
+        # network at junctions (8-comp mask -> 20+ comps of strokes), and
+        # curve continuation can't be re-inferred from thin-skeleton
+        # shape alone. Once drawn as a width_px ribbon, the two sides of
+        # a break sit within a few px of each other and a small close
+        # welds them; debris smaller than a pen stroke is dropped
+        # (150px at ribbon width 4-5 = any real stroke is thousands).
+        # Measured on the trimer test: 21 comps/11 tiny -> 5/0 per chain
+        # network, real junction features preserved.
+        m = cv2.morphologyEx(m, cv2.MORPH_CLOSE,
+                             np.ones((5, 5), np.uint8))
+        nf, lf, stf, _ = cv2.connectedComponentsWithStats(m, 8)
+        for i in range(1, nf):
+            if stf[i, cv2.CC_STAT_AREA] < 150:
+                m[lf == i] = 0
         return trace_mask_g1(m, min_area=25, scale=1.0, eps=1.2,
                              corner_deg=80.0)
 
