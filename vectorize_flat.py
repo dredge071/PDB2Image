@@ -919,7 +919,9 @@ def main():
               f"surf={len(surf_ink[ch])} paths", flush=True)
 
     ink_rgb = tuple(int(v) for v in args.ink_color.split(","))
-    surf_ink_rgb = tuple(int(v * 0.75 + 30) for v in ink_rgb)
+    # surface ink is one shade lighter than the cartoon ink so it does
+    # not compete with it through the translucent shell
+    surf_ink_rgb = tuple(int(v * 0.65 + 40) for v in ink_rgb)
 
     # surface tone thresholds from the shading luminance
     sthr_hi = sthr_lo = None
@@ -1106,7 +1108,7 @@ def main():
                                 band_paths(clean_band(s_sm & (s_lum < sthr_hi)), alw)]
                              + [(d, dark) for d in
                                 band_paths(clean_band(s_sm & (s_lum < sthr_lo)), alw)])
-                    op = ' fill-opacity="0.55"' if rep == "both" else ""
+                    op = ' fill-opacity="0.5"' if rep == "both" else ""
                     lines.append(f'<g id="Chain_{ch}_full_surface"{op}>')
                     lines += [f'<path d="{d}" fill="rgb({c[0]},{c[1]},{c[2]})"/>'
                               for d, c in fills]
@@ -1150,7 +1152,7 @@ def main():
                 fills += [(d, dark) for d in
                           band_paths(clean_band(smasks[ch] & (slum < sthr_lo)))]
                 si = [(d, surf_ink_rgb) for d in surf_ink[ch]]
-                op = ' fill-opacity="0.55"' if rep == "both" else ""
+                op = ' fill-opacity="0.5"' if rep == "both" else ""
                 vis.append(f'<g id="Chain_{ch}_surface"{op}>')
                 vis += [f'<path d="{d}" fill="rgb({c[0]},{c[1]},{c[2]})"/>'
                         for d, c in fills]
