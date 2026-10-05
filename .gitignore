@@ -9,3 +9,4 @@ out/
 ai_preview.*
 PLAN.md
 docs/full_layering_spec.md
+gude-*.log
