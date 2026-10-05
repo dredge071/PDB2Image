@@ -239,6 +239,74 @@ def bridge_endpoints(S, max_dist=18.0, min_dot=-0.4, max_perp=3.5):
     return S.astype(bool)
 
 
+def ribbon_bridge(m, max_dist=18.0, dot_thr=0.7, width=4):
+    """Reconnect stroke breaks at the PAINTED-RIBBON level without
+    welding parallel strokes.
+
+    A plain morphological close heals real breaks but also merges two
+    lines that merely pass near each other (loop turns): close k5 took
+    wide-ink area from 3.5k to 29k px on the trimer test. Here the
+    ribbon is skeletonized; stroke TIPS (skeleton endpoints) closer than
+    max_dist are connected only when both local tangents run ALONG the
+    connecting line - true break tips face each other axially, while
+    neighbouring parallel strokes' tips sit perpendicular to their
+    separation and are refused."""
+    Sk = thinning(m > 0)
+    Hh, Ww = Sk.shape
+    nb = np.zeros((Hh, Ww), np.uint8)
+    for dy, dx in OFFS8:
+        nb += np.roll(np.roll(Sk, dy, 0), dx, 1).astype(np.uint8)
+    ys, xs = np.nonzero(Sk & (nb == 1))
+    if len(ys) < 2:
+        return m
+    pts = np.stack([xs, ys], 1).astype(float)
+    d = np.linalg.norm(pts[:, None] - pts[None, :], axis=2)
+    iu = np.triu_indices(len(pts), 1)
+    out = m.copy()
+    used = set()
+
+    def tangent(pi):
+        # walk ~6 px into the stroke from its tip; that is the local
+        # direction the pen was moving
+        y, x = int(pts[pi][1]), int(pts[pi][0])
+        cur, prev = (y, x), None
+        for _ in range(6):
+            nxt = []
+            for dy2, dx2 in OFFS8:
+                q = (cur[0] + dy2, cur[1] + dx2)
+                if 0 <= q[0] < Hh and 0 <= q[1] < Ww and Sk[q] and q != prev:
+                    nxt.append(q)
+            if not nxt:
+                break
+            prev, cur = cur, nxt[0]
+        v = np.array([cur[1] - x, cur[0] - y], float)
+        nn = np.linalg.norm(v)
+        return v / nn if nn > 0 else np.zeros(2)
+
+    cand = [(d[iu[0][k], iu[1][k]], iu[0][k], iu[1][k])
+            for k in range(len(iu[0]))
+            if 3 < d[iu[0][k], iu[1][k]] < max_dist]
+    cand.sort()
+    for dist, a, b in cand:
+        if a in used or b in used:
+            continue
+        ta, tb = tangent(a), tangent(b)
+        seg = pts[b] - pts[a]
+        u = seg / (np.linalg.norm(seg) + 1e-9)
+        if (abs(float(np.dot(ta, u))) < dot_thr
+                or abs(float(np.dot(tb, -u))) < dot_thr):
+            continue
+        # extend 4px INTO each stroke so the joint is a solid overlap,
+        # not a point contact that bezier retracing (eps 1.2) shaves
+        # apart again
+        pa = pts[a] - ta * 4.0
+        pb = pts[b] - tb * 4.0
+        cv2.line(out, (int(pa[0]), int(pa[1])),
+                 (int(pb[0]), int(pb[1])), 1, width)
+        used.update((a, b))
+    return out
+
+
 def skeleton_polylines(S, scale, min_len, smooth_win=9, smooth_rounds=2):
     """Skeleton pixel graph -> merged, SMOOTHED open polylines.
 
@@ -646,59 +714,9 @@ def main():
         return skeleton_polylines(S, scale=1.0, min_len=2.0)
 
     def ink_paths_keep(pls, width_px, label=None):
-        """One chain's share of the scene centerlines as uniform-width
-        filled ribbon paths.
-
-        Each polyline is split into runs by chain territory (the
-        nearest-chain partition); boundary points belong to BOTH chains
-        so neighbouring ribbons abut seamlessly. Ribbons are drawn at 2x
-        and downscaled: the smoothed centerline points are sub-pixel, and
-        rounding them onto the 1px grid re-introduced the zigzag. eps=1.2
-        needs the ribbon comfortably wider than 2*eps (4-5px here leaves
-        >1px of safety; the old 3px ribbons crossed walls and crackled,
-        cancelling strips of ink - the 'crackle' artifact)."""
-        H, W = chain_lbl.shape
-        up = 2
-        m = np.zeros((H * up, W * up), dtype=np.uint8)
-        th = int(width_px * up)
-        for a in pls:
-            if label is None:
-                # solo render: a single chain, no territory to split by
-                cv2.polylines(m, [np.round(a * up).astype(np.int32)],
-                              False, 255, thickness=th)
-                continue
-            xi = np.clip(np.round(a[:, 0]).astype(int), 0, W - 1)
-            yi = np.clip(np.round(a[:, 1]).astype(int), 0, H - 1)
-            labs = chain_lbl[yi, xi]
-            brk = np.nonzero(np.diff(labs))[0]
-            start = 0
-            for b in list(brk) + [len(a) - 1]:
-                seg = a[max(0, start - 1):b + 2]   # 1-pt overlap both sides
-                if len(seg) >= 2 and labs[start] == label:
-                    cv2.polylines(m, [np.round(seg * up).astype(np.int32)],
-                                  False, 255, thickness=th)
-                start = b + 1
-        if not (m > 0).any():
-            return []
-        m = cv2.resize(m, (W, H), interpolation=cv2.INTER_AREA)
-        m = ((m > 127).astype(np.uint8)) * 255
-        # post-fuse at RIBBON level: skeletonization shatters the line
-        # network at junctions (8-comp mask -> 20+ comps of strokes), and
-        # curve continuation can't be re-inferred from thin-skeleton
-        # shape alone. Once drawn as a width_px ribbon, the two sides of
-        # a break sit within a few px of each other and a small close
-        # welds them; debris smaller than a pen stroke is dropped
-        # (150px at ribbon width 4-5 = any real stroke is thousands).
-        # Measured on the trimer test: 21 comps/11 tiny -> 5/0 per chain
-        # network, real junction features preserved.
-        m = cv2.morphologyEx(m, cv2.MORPH_CLOSE,
-                             np.ones((5, 5), np.uint8))
-        nf, lf, stf, _ = cv2.connectedComponentsWithStats(m, 8)
-        for i in range(1, nf):
-            if stf[i, cv2.CC_STAT_AREA] < 150:
-                m[lf == i] = 0
-        return trace_mask_g1(m, min_area=25, scale=1.0, eps=1.2,
-                             corner_deg=80.0)
+        """Deprecated wrapper kept for reference; the live path is
+        ribbon_network() + chain_ink_paths()."""
+        raise NotImplementedError
 
     def depth_edge_pls(dep_png, allow):
         """Cartoon ink from DEPTH-JUMP edges (ChimeraX principle): Sobel
@@ -771,6 +789,55 @@ def main():
     # over the old 3px buys eps=1.2 smoothing without wall-crossing
     cart_w = 4.0 if args.ink_dilate == 0 else 5.0
     surf_w = 5.0
+
+    def ribbon_network(pls, width_px):
+        """Whole-scene ink as ONE bridged ribbon mask: strokes are drawn
+        full-network, then breaks are reconnected by ribbon_bridge
+        (endpoint pairs whose tangents run along the connecting line -
+        refuses to weld parallel strokes that pass near each other, the
+        loop-turn 'sticking' a plain close caused). Per-chain splitting
+        happens afterwards at the mask level, so a break that straddles
+        a chain boundary is healed BEFORE the split cuts it."""
+        H, W = chain_lbl.shape
+        up = 2
+        m = np.zeros((H * up, W * up), dtype=np.uint8)
+        th = int(width_px * up)
+        for a in pls:
+            cv2.polylines(m, [np.round(a * up).astype(np.int32)],
+                          False, 255, thickness=th)
+        if not (m > 0).any():
+            return None
+        m = cv2.resize(m, (W, H), interpolation=cv2.INTER_AREA)
+        m = (m > 127).astype(np.uint8)
+        return (ribbon_bridge(m, width=int(round(width_px))) > 0
+                ).astype(np.uint8)
+
+    def chain_ink_paths(net, ci_, width_px):
+        """One chain's share of a bridged ribbon network: pixel-level
+        territory mask, debris drop, G1 trace. Territory dilated 4 so
+        neighbouring chains' drawings overlap 6-8px at the boundary -
+        the eps=1.2 contour shrinkage of the G1 trace then cannot open
+        a seam between the two halves of a stroke crossing the boundary
+        (dilate 2 abutted exactly and rendered with 1-3px hairline
+        gaps). The debris cutoff is deliberately low (40px): the cut
+        splits real strokes into short halves, and a 150px cutoff
+        deleted those halves; only 1-5px slivers are debris at ribbon
+        width 4-5."""
+        if net is None:
+            return []
+        H, W = chain_lbl.shape
+        terr = cv2.dilate((chain_lbl == ci_).astype(np.uint8),
+                          np.ones((3, 3), np.uint8), iterations=4) > 0
+        m = net & terr
+        nf, lf, stf, _ = cv2.connectedComponentsWithStats(m, 8)
+        for i in range(1, nf):
+            if stf[i, cv2.CC_STAT_AREA] < 40:
+                m[lf == i] = 0
+        if not (m > 0).any():
+            return []
+        return trace_mask_g1(m * 255, min_area=25, scale=1.0, eps=1.2,
+                             corner_deg=80.0)
+
     use_depth_ink = (args.ink_source == "depth"
                      and os.path.exists(os.path.join(rd, "depth.png")))
     if use_depth_ink:
@@ -786,11 +853,12 @@ def main():
                     if have_cart else [])
     surf_pls = (ink_centerlines(ink_raw_of(os.path.join(rd, "surfink.png")))
                 if have_surf else [])
+    cart_net = ribbon_network(cart_pls, cart_w) if have_cart else None
+    surf_net = ribbon_network(surf_pls, surf_w) if have_surf else None
     cart_ink, surf_ink = {}, {}
     for ci, ch in enumerate(chains):
-        ci_ = ci
-        cart_ink[ch] = ink_paths_keep(cart_pls, cart_w) if have_cart else []
-        surf_ink[ch] = ink_paths_keep(surf_pls, surf_w) if have_surf else []
+        cart_ink[ch] = chain_ink_paths(cart_net, ci, cart_w) if have_cart else []
+        surf_ink[ch] = chain_ink_paths(surf_net, ci, surf_w) if have_surf else []
     for ch in chains:
         print(f"[vec] ink {ch}: cart={len(cart_ink[ch])} "
               f"surf={len(surf_ink[ch])} paths", flush=True)
@@ -849,7 +917,7 @@ def main():
                 if use_depth_ink and os.path.exists(
                         os.path.join(rd, f"solodepth{ch}.png")):
                     # solo: the chain's own silhouette at native res is
-                    # the allow mask; no territory split needed either way
+                    # the allow mask; single chain, no territory split
                     dep = Image.open(os.path.join(rd, f"solodepth{ch}.png"))
                     Wn, Hn = dep.size
                     del dep
@@ -859,22 +927,49 @@ def main():
                     sn = cv2.dilate(sn.astype(np.uint8),
                                     np.ones((3, 3), np.uint8),
                                     iterations=2).astype(bool)
-                    solo_cart_ink[ch] = ink_paths_keep(
-                        depth_edge_pls(os.path.join(rd, f"solodepth{ch}.png"),
-                                       sn),
+                    solo_net = ribbon_network(
+                        depth_edge_pls(
+                            os.path.join(rd, f"solodepth{ch}.png"), sn),
                         cart_w)
+                    m = solo_net if solo_net is not None else np.zeros(
+                        chain_lbl.shape, np.uint8)
+                    nf, lf, stf, _ = cv2.connectedComponentsWithStats(m, 8)
+                    for i2 in range(1, nf):
+                        if stf[i2, cv2.CC_STAT_AREA] < 40:
+                            m[lf == i2] = 0
+                    solo_cart_ink[ch] = (trace_mask_g1(
+                        m * 255, min_area=25, scale=1.0, eps=1.2,
+                        corner_deg=80.0) if (m > 0).any() else [])
                 else:
-                    solo_cart_ink[ch] = ink_paths_keep(
+                    solo_net = ribbon_network(
                         ink_centerlines(
                             ink_raw_of(os.path.join(rd,
                                                     f"soloink{ch}.png"))),
                         cart_w)
+                    m = solo_net if solo_net is not None else np.zeros(
+                        chain_lbl.shape, np.uint8)
+                    nf, lf, stf, _ = cv2.connectedComponentsWithStats(m, 8)
+                    for i2 in range(1, nf):
+                        if stf[i2, cv2.CC_STAT_AREA] < 40:
+                            m[lf == i2] = 0
+                    solo_cart_ink[ch] = (trace_mask_g1(
+                        m * 255, min_area=25, scale=1.0, eps=1.2,
+                        corner_deg=80.0) if (m > 0).any() else [])
             if have_surf:
-                solo_surf_ink[ch] = ink_paths_keep(
+                solo_net = ribbon_network(
                     ink_centerlines(
                         ink_raw_of(os.path.join(rd,
                                        f"solosurfink{ch}.png"))),
                     surf_w)
+                m = solo_net if solo_net is not None else np.zeros(
+                    chain_lbl.shape, np.uint8)
+                nf, lf, stf, _ = cv2.connectedComponentsWithStats(m, 8)
+                for i2 in range(1, nf):
+                    if stf[i2, cv2.CC_STAT_AREA] < 40:
+                        m[lf == i2] = 0
+                solo_surf_ink[ch] = (trace_mask_g1(
+                    m * 255, min_area=25, scale=1.0, eps=1.2,
+                    corner_deg=80.0) if (m > 0).any() else [])
             print(f"[vec] solo ink {ch}: cart={len(solo_cart_ink.get(ch, []))}"
                   f" surf={len(solo_surf_ink.get(ch, []))} paths", flush=True)
 
