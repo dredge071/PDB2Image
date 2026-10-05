@@ -63,7 +63,7 @@ conda create -p "D:\somewhere\pymol-env" -c conda-forge ^
 主 Python 环境（≥3.10）只装矢量化 + 网站依赖：
 
 ```bash
-pip install -r webapp/requirements.txt
+pip install -r requirements.txt
 ```
 
 PyMOL 单独一个环境（名称位置随意）：
@@ -199,7 +199,7 @@ visible 并在日志说明），渲染时间比较长。
 ## 依赖小结
 
 - 渲染：独立 PyMOL 环境（PyMOL 3.x；本管线会多进程并行调用，`--workers 1` 退回串行）
-- 矢量化 / 网站：numpy、opencv-python、pillow、pymupdf、flask（见根 `requirements.txt` 或 `webapp/requirements.txt`）
+- 矢量化 / 网站：numpy、opencv-python、pillow、pymupdf、flask（见根 `requirements.txt`）
 - .ai 导出：Windows + 本机 Adobe Illustrator（COM）；导出结束后自动关闭 Illustrator
 - 自包含：`vec_core.py` 内置全部描摹原语，仓库不依赖其他项目目录
 

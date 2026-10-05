@@ -50,7 +50,7 @@ PyMOL 环境路径按以下顺序自动探测：环境变量 `FLAT_TRACE_PYMOL_P
 | start_web.bat / stop_web.bat | 一键启动（含打开浏览器）/ 一键停止（连子进程） |
 | static/ | 前端单页（原生 JS，无构建步骤） |
 | jobs/ | 每个任务的产物目录（input.pdb、render/、flat_*.svg、*.ai、job.json） |
-| requirements.txt | 依赖（渲染端 PyMOL 除外） |
+| 仓库根 `requirements.txt` | 依赖（渲染端 PyMOL 除外） |
 
 ## 接口
 
