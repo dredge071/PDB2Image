@@ -901,17 +901,13 @@ def main():
         cart_pls = (ink_centerlines(
                         ink_raw_of(os.path.join(rd, "ink.png")))
                     if have_cart else [])
-    # surface ink: depth-jump on surfdepth.png when present, else mode-1
-    surf_png = os.path.join(rd, "surfdepth.png")
-    if have_surf:
-        if args.ink_source == "depth" and os.path.exists(surf_png):
-            print("[vec] surface ink source: depth-jump", flush=True)
-            allow_surf = native_allow("surfmask{ch}.png")
-            surf_pls = depth_edge_pls(surf_png, allow_surf)
-        else:
-            surf_pls = (ink_centerlines(
-                            ink_raw_of(os.path.join(rd, "surfink.png")))
-                        if have_surf else [])
+    # surface ink stays MODE-1 even when the cartoon ink is depth-jump:
+    # the surface shell is smooth, its interior creases have fog-gradient
+    # ~9 (0-255) vs the cartoon's ~130, below any sane threshold - a
+    # depth-jump source recovers only the silhouette ring (measured: 54%
+    # of mode-1 surf ink covered, interior creases all lost)
+    surf_pls = (ink_centerlines(ink_raw_of(os.path.join(rd, "surfink.png")))
+                if have_surf else [])
     cart_net = ribbon_network(cart_pls, cart_w) if have_cart else None
     surf_net = ribbon_network(surf_pls, surf_w) if have_surf else None
     cart_ink, surf_ink = {}, {}
@@ -1015,28 +1011,14 @@ def main():
                         m * 255, min_area=25, scale=1.0, eps=0.8,
                         corner_deg=80.0) if (m > 0).any() else [])
             if have_surf:
-                ssd = os.path.join(rd, f"solosurfdepth{ch}.png")
-                if (args.ink_source == "depth"
-                        and os.path.exists(ssd)):
-                    # solo surface: this chain's surface silhouette at
-                    # the solo depth map's native res is the allow mask
-                    dep = Image.open(ssd)
-                    Wn, Hn = dep.size
-                    del dep
-                    sn = np.array(Image.open(
-                        os.path.join(rd, f"solosurfmask{ch}.png")
-                        ).convert("L").resize((Wn, Hn), Image.BILINEAR)) > 128
-                    sn = cv2.dilate(sn.astype(np.uint8),
-                                    np.ones((3, 3), np.uint8),
-                                    iterations=2).astype(bool)
-                    solo_net = ribbon_network(depth_edge_pls(ssd, sn),
-                                              surf_w)
-                else:
-                    solo_net = ribbon_network(
-                        ink_centerlines(
-                            ink_raw_of(os.path.join(rd,
-                                           f"solosurfink{ch}.png"))),
-                        surf_w)
+                # solo surface ink: mode-1 raster (same reasoning as the
+                # scene surface ink - the shell's interior creases are
+                # invisible in the fog depth)
+                solo_net = ribbon_network(
+                    ink_centerlines(
+                        ink_raw_of(os.path.join(rd,
+                                       f"solosurfink{ch}.png"))),
+                    surf_w)
                 m = solo_net if solo_net is not None else np.zeros(
                     chain_lbl.shape, np.uint8)
                 nf, lf, stf, _ = cv2.connectedComponentsWithStats(m, 8)
@@ -1124,7 +1106,7 @@ def main():
                                 band_paths(clean_band(s_sm & (s_lum < sthr_hi)), alw)]
                              + [(d, dark) for d in
                                 band_paths(clean_band(s_sm & (s_lum < sthr_lo)), alw)])
-                    op = ' fill-opacity="0.4"' if rep == "both" else ""
+                    op = ' fill-opacity="0.55"' if rep == "both" else ""
                     lines.append(f'<g id="Chain_{ch}_full_surface"{op}>')
                     lines += [f'<path d="{d}" fill="rgb({c[0]},{c[1]},{c[2]})"/>'
                               for d, c in fills]
@@ -1168,7 +1150,7 @@ def main():
                 fills += [(d, dark) for d in
                           band_paths(clean_band(smasks[ch] & (slum < sthr_lo)))]
                 si = [(d, surf_ink_rgb) for d in surf_ink[ch]]
-                op = ' fill-opacity="0.4"' if rep == "both" else ""
+                op = ' fill-opacity="0.55"' if rep == "both" else ""
                 vis.append(f'<g id="Chain_{ch}_surface"{op}>')
                 vis += [f'<path d="{d}" fill="rgb({c[0]},{c[1]},{c[2]})"/>'
                         for d, c in fills]
