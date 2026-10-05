@@ -252,6 +252,20 @@ def render_spec(spec, args, chains, all_cart, all_surf):
         snap(rf"{od}\surfink.png", args.width, args.height, True, "black")
         cmd.set("ray_trace_mode", 0)
 
+    elif spec == "surfdepth":
+        # fog-depth of the surface alone (same slab as the cartoon depth
+        # pass): source for depth-jump surface ink in vectorize_flat
+        flat_light()
+        for c2 in chains:
+            cmd.color("white", f"surf{c2}")
+        enable_only(all_surf)
+        cmd.set("depth_cue", 1)
+        cmd.set("fog", 1)
+        cmd.set("fog_start", 0.0)   # full contrast: fog spans the whole slab
+        snap(rf"{od}\surfdepth.png", W2, H2, True, "black")
+        cmd.set("depth_cue", 0)
+        cmd.set("fog", 0)
+
     # ---- full-layering solo channels: this chain alone in the scene ----
     elif spec.startswith("solomask"):
         ch = spec[len("solomask"):]
@@ -315,6 +329,20 @@ def render_spec(spec, args, chains, all_cart, all_surf):
         snap(rf"{od}\solosurfink{ch}.png", args.width, args.height, True,
              "black")
         cmd.set("ray_trace_mode", 0)
+
+    elif spec.startswith("solosurfdepth"):
+        # this chain's surface alone in the scene, fog depth (same slab
+        # as the scene surfdepth pass): source for depth-jump solo ink
+        ch = spec[len("solosurfdepth"):]
+        flat_light()
+        cmd.color("white", f"surf{ch}")
+        enable_only([f"surf{ch}"])
+        cmd.set("depth_cue", 1)
+        cmd.set("fog", 1)
+        cmd.set("fog_start", 0.0)
+        snap(rf"{od}\solosurfdepth{ch}.png", W2, H2, True, "black")
+        cmd.set("depth_cue", 0)
+        cmd.set("fog", 0)
 
     elif spec.startswith("mask"):
         ch = spec[len("mask"):]
@@ -426,7 +454,7 @@ def build_specs(args, chains):
     specs += ["depth", "sse", "shade0", "shade120", "shade240", "ink", "prev"]
     if args.rep in ("surface", "both"):
         specs += [f"surfmask{ch}" for ch in chains]
-        specs += ["surfshade", "surfink"]
+        specs += ["surfshade", "surfdepth", "surfink"]
     if args.layer_mode == "full":
         # solo = this chain alone: the complete chain (occluded parts in)
         specs += [f"solomask{ch}" for ch in chains]
@@ -435,6 +463,7 @@ def build_specs(args, chains):
         if args.rep in ("surface", "both"):
             specs += [f"solosurfmask{ch}" for ch in chains]
             specs += [f"solosurfshade{ch}" for ch in chains]
+            specs += [f"solosurfdepth{ch}" for ch in chains]
             specs += [f"solosurfink{ch}" for ch in chains]
     return specs
 

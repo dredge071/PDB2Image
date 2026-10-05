@@ -800,9 +800,9 @@ def main():
         S = bridge_endpoints(S, max_dist=25.0)
         return skeleton_polylines(S, scale=CANON_W / dep.width, min_len=2.0)
 
-    def native_allow(png_fmt, extra_png=None):
-        """Cartoon-pixels-only allow mask at the DEPTH map's native
-        resolution: the depth band straddles the silhouette (its AA ramp
+    def native_allow(fmt):
+        """Silhouette allow mask at a depth map's native resolution:
+        the depth band straddles the silhouette (its AA ramp
         and the mask's >128 threshold disagree by ~1px), so unrestricted
         edges would draw lines OUTSIDE the object. Dilate 2px keeps the
         line ON the silhouette without clipping interior creases."""
@@ -812,13 +812,8 @@ def main():
         un = np.zeros((Hn, Wn), dtype=bool)
         for ch in chains:
             un |= np.array(Image.open(os.path.join(
-                rd, png_fmt.format(ch=ch))).convert("L")
+                rd, fmt.format(ch=ch))).convert("L")
                 .resize((Wn, Hn), Image.BILINEAR)) > 128
-        if extra_png:
-            un |= np.array(Image.open(os.path.join(rd, extra_png)
-                                      ).convert("L").resize((Wn, Hn),
-                                                            Image.BILINEAR)
-                           ) > 128
         return cv2.dilate(un.astype(np.uint8), np.ones((3, 3), np.uint8),
                           iterations=2).astype(bool)
 
@@ -906,8 +901,17 @@ def main():
         cart_pls = (ink_centerlines(
                         ink_raw_of(os.path.join(rd, "ink.png")))
                     if have_cart else [])
-    surf_pls = (ink_centerlines(ink_raw_of(os.path.join(rd, "surfink.png")))
-                if have_surf else [])
+    # surface ink: depth-jump on surfdepth.png when present, else mode-1
+    surf_png = os.path.join(rd, "surfdepth.png")
+    if have_surf:
+        if args.ink_source == "depth" and os.path.exists(surf_png):
+            print("[vec] surface ink source: depth-jump", flush=True)
+            allow_surf = native_allow("surfmask{ch}.png")
+            surf_pls = depth_edge_pls(surf_png, allow_surf)
+        else:
+            surf_pls = (ink_centerlines(
+                            ink_raw_of(os.path.join(rd, "surfink.png")))
+                        if have_surf else [])
     cart_net = ribbon_network(cart_pls, cart_w) if have_cart else None
     surf_net = ribbon_network(surf_pls, surf_w) if have_surf else None
     cart_ink, surf_ink = {}, {}
@@ -1011,11 +1015,28 @@ def main():
                         m * 255, min_area=25, scale=1.0, eps=0.8,
                         corner_deg=80.0) if (m > 0).any() else [])
             if have_surf:
-                solo_net = ribbon_network(
-                    ink_centerlines(
-                        ink_raw_of(os.path.join(rd,
-                                       f"solosurfink{ch}.png"))),
-                    surf_w)
+                ssd = os.path.join(rd, f"solosurfdepth{ch}.png")
+                if (args.ink_source == "depth"
+                        and os.path.exists(ssd)):
+                    # solo surface: this chain's surface silhouette at
+                    # the solo depth map's native res is the allow mask
+                    dep = Image.open(ssd)
+                    Wn, Hn = dep.size
+                    del dep
+                    sn = np.array(Image.open(
+                        os.path.join(rd, f"solosurfmask{ch}.png")
+                        ).convert("L").resize((Wn, Hn), Image.BILINEAR)) > 128
+                    sn = cv2.dilate(sn.astype(np.uint8),
+                                    np.ones((3, 3), np.uint8),
+                                    iterations=2).astype(bool)
+                    solo_net = ribbon_network(depth_edge_pls(ssd, sn),
+                                              surf_w)
+                else:
+                    solo_net = ribbon_network(
+                        ink_centerlines(
+                            ink_raw_of(os.path.join(rd,
+                                           f"solosurfink{ch}.png"))),
+                        surf_w)
                 m = solo_net if solo_net is not None else np.zeros(
                     chain_lbl.shape, np.uint8)
                 nf, lf, stf, _ = cv2.connectedComponentsWithStats(m, 8)
