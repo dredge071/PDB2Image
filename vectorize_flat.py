@@ -263,6 +263,7 @@ def ribbon_bridge(m, max_dist=18.0, dot_thr=0.7, width=4):
     d = np.linalg.norm(pts[:, None] - pts[None, :], axis=2)
     iu = np.triu_indices(len(pts), 1)
     out = m.copy()
+    neck = np.zeros_like(m, np.uint8)
     used = set()
 
     def tangent(pi):
@@ -297,13 +298,22 @@ def ribbon_bridge(m, max_dist=18.0, dot_thr=0.7, width=4):
                 or abs(float(np.dot(tb, -u))) < dot_thr):
             continue
         # extend 4px INTO each stroke so the joint is a solid overlap,
-        # not a point contact that bezier retracing (eps 1.2) shaves
-        # apart again
+        # and draw the neck WIDER than the strokes: the G1 retrace
+        # shaves corner bulges by ~1px per side, which re-opens
+        # width-only necks into 2px hairline breaks (the residual
+        # 'barely disconnected' ink). width+3 survives the shave.
         pa = pts[a] - ta * 4.0
         pb = pts[b] - tb * 4.0
-        cv2.line(out, (int(pa[0]), int(pa[1])),
-                 (int(pb[0]), int(pb[1])), 1, width)
+        cv2.line(neck, (int(pa[0]), int(pa[1])),
+                 (int(pb[0]), int(pb[1])), 1, 1)
         used.update((a, b))
+    if neck.any():
+        # dilate the 1px neck centerlines by (width+3)/2: joints end up
+        # WIDER than the strokes and axis-aligned enough that the G1
+        # corner shave cannot thin them to AA-gray hairlines
+        r = int((width + 3) // 2)
+        kx = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2*r+1, 2*r+1))
+        out |= cv2.dilate(neck, kx) > 0
     return out
 
 
@@ -844,7 +854,7 @@ def main():
         """One chain's share of a bridged ribbon network: pixel-level
         territory mask, debris drop, G1 trace. Territory dilated 4 so
         neighbouring chains' drawings overlap 6-8px at the boundary -
-        the eps=1.2 contour shrinkage of the G1 trace then cannot open
+        the eps=0.8 contour shrinkage of the G1 trace then cannot open
         a seam between the two halves of a stroke crossing the boundary
         (dilate 2 abutted exactly and rendered with 1-3px hairline
         gaps). The debris cutoff is deliberately low (40px): the cut
@@ -854,6 +864,13 @@ def main():
         if net is None:
             return []
         H, W = chain_lbl.shape
+        # territory dilated 4: neighbouring chains' drawings overlap
+        # 6-8px at the boundary so the eps=1.2 contour shrinkage of the
+        # G1 trace cannot open a seam between the two halves of a stroke
+        # crossing the boundary (dilate 2 abutted exactly and rendered
+        # with 1-3px hairline gaps). Trace eps is 0.8: the old 1.2 shaved
+        # ~1.2px per contour tip/corner, re-opening 2-6px hairline breaks
+        # between abutting fragments (the residual 'barely broken' ink)
         terr = cv2.dilate((chain_lbl == ci_).astype(np.uint8),
                           np.ones((3, 3), np.uint8), iterations=4) > 0
         m = net & terr
@@ -863,7 +880,17 @@ def main():
                 m[lf == i] = 0
         if not (m > 0).any():
             return []
-        return trace_mask_g1(m * 255, min_area=25, scale=1.0, eps=1.2,
+        # SECOND bridge pass AFTER the territory cut: the cut severs the
+        # network-bridged strokes again, and eps retracing shortens each
+        # fragment's end by ~1.2px, re-opening 2-6px hairline breaks at
+        # the boundary (the residual 'barely disconnected' ink). Bridging
+        # the cut mask once more heals exactly those, without touching
+        # parallel lines (same tangent arbitration as the network pass).
+        m = (ribbon_bridge(m, width=int(round(width_px))) > 0
+             ).astype(np.uint8)
+        if not (m > 0).any():
+            return []
+        return trace_mask_g1(m * 255, min_area=25, scale=1.0, eps=0.8,
                              corner_deg=80.0)
 
     use_depth_ink = (args.ink_source == "depth"
@@ -966,7 +993,7 @@ def main():
                         if stf[i2, cv2.CC_STAT_AREA] < 40:
                             m[lf == i2] = 0
                     solo_cart_ink[ch] = (trace_mask_g1(
-                        m * 255, min_area=25, scale=1.0, eps=1.2,
+                        m * 255, min_area=25, scale=1.0, eps=0.8,
                         corner_deg=80.0) if (m > 0).any() else [])
                 else:
                     solo_net = ribbon_network(
@@ -981,7 +1008,7 @@ def main():
                         if stf[i2, cv2.CC_STAT_AREA] < 40:
                             m[lf == i2] = 0
                     solo_cart_ink[ch] = (trace_mask_g1(
-                        m * 255, min_area=25, scale=1.0, eps=1.2,
+                        m * 255, min_area=25, scale=1.0, eps=0.8,
                         corner_deg=80.0) if (m > 0).any() else [])
             if have_surf:
                 solo_net = ribbon_network(
@@ -996,7 +1023,7 @@ def main():
                     if stf[i2, cv2.CC_STAT_AREA] < 40:
                         m[lf == i2] = 0
                 solo_surf_ink[ch] = (trace_mask_g1(
-                    m * 255, min_area=25, scale=1.0, eps=1.2,
+                    m * 255, min_area=25, scale=1.0, eps=0.8,
                     corner_deg=80.0) if (m > 0).any() else [])
             print(f"[vec] solo ink {ch}: cart={len(solo_cart_ink.get(ch, []))}"
                   f" surf={len(solo_surf_ink.get(ch, []))} paths", flush=True)
